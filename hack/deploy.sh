@@ -137,14 +137,14 @@ JQ_CLEAN='del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimest
 
 for crd in $(yq '.crds[]' "$CONFIG" 2>/dev/null); do
   echo "  Fetching $crd..."
-  kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply -f -
+  kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply --server-side --force-conflicts -f -
 done
 
 for group in $(yq '.crdGroups[]' "$CONFIG" 2>/dev/null); do
   echo "  Fetching all CRDs matching *.$group..."
   for crd in $(kubectl get crd --context "$HOST_CONTEXT" -o name 2>/dev/null | grep "\.${group}$" | sed 's|customresourcedefinition.apiextensions.k8s.io/||'); do
     echo "    $crd"
-    kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply -f -
+    kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply --server-side --force-conflicts -f -
   done
 done
 sleep 5
