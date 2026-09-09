@@ -1,0 +1,43 @@
+# Configuration for vcluster-openshift deployment.
+# Edit this file to customize the deployment for your environment.
+
+# Dedicated etcd sidecar for openshift-apiserver
+etcd:
+  image: quay.io/coreos/etcd:v3.5.17
+  clientPort: 2479
+  peerPort: 2480
+
+# openshift-apiserver sidecar
+openshiftApiserver:
+  port: 8444
+
+# API groups served by openshift-apiserver.
+# An APIService is registered for each group inside the vCluster.
+apiGroups:
+  - image.openshift.io
+  - route.openshift.io
+  - apps.openshift.io
+  - build.openshift.io
+  - project.openshift.io
+  - authorization.openshift.io
+  - template.openshift.io
+  # user.openshift.io and oauth.openshift.io are served by oauth-apiserver, not openshift-apiserver, would need separate sidecar
+
+# Individual CRDs to fetch from the host OCP cluster.
+crds:
+  - clusterresourcequotas.quota.openshift.io
+  - securitycontextconstraints.security.openshift.io
+
+# Fetch ALL CRDs matching these group suffixes from the host.
+# Avoids listing dozens of CRDs individually.
+crdGroups:
+  - config.openshift.io
+  - operator.openshift.io
+  - monitoring.coreos.com
+
+# Resources to copy from the host OCP cluster into the vCluster.
+# Unlike CRDs (schemas), these are actual cluster objects that workloads query.
+hostResources:
+  - group: config.openshift.io
+    resource: clusterversions
+    name: version

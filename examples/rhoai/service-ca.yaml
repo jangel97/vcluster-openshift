@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-service-ca
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: service-ca
+  namespace: openshift-service-ca
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-ca-controller
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: service-ca-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-ca-controller
+subjects:
+- kind: ServiceAccount
+  name: service-ca
+  namespace: openshift-service-ca
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-ca
+  namespace: openshift-service-ca
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-ca
+  template:
+    metadata:
+      labels:
+        app: service-ca
+    spec:
+      serviceAccountName: service-ca
+      containers:
+      - name: service-ca-controller
+        image: SERVICE_CA_OPERATOR_IMAGE
+        command:
+        - service-ca-operator
+        - controller
+        args:
+        - -v=2
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 10m
+            memory: 120Mi
+        securityContext:
+          runAsNonRoot: true
+        volumeMounts:
+        - name: signing-key
+          mountPath: /var/run/secrets/signing-key
+        - name: signing-cabundle
+          mountPath: /var/run/configmaps/signing-cabundle
+      volumes:
+      - name: signing-key
+        secret:
+          secretName: service-ca-signing-key
+      - name: signing-cabundle
+        configMap:
+          name: signing-cabundle

@@ -47,8 +47,8 @@ vCluster StatefulSet pod
     └── uses front-proxy certs for API aggregation
 
 Inside vCluster:
-├── 7 APIServices → openshift-apiserver (image, route, apps, build, project, authorization, template)
-└── 6 CRDs fetched from host (admission plugin informer dependencies, configured in config/deploy-config.yaml)
+├── APIServices auto-discovered from openshift-apiserver and registered dynamically
+└── 6 CRDs fetched from host (admission plugin informer dependencies, configured in config.yaml)
 ```
 
 ## Prerequisites
@@ -100,7 +100,7 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 
 - `kubectl get imagestreams` inside the vCluster
 - ImageStream creation, update, deletion
-- 7 OpenShift API groups registered and `Available: True`
+- OpenShift API groups auto-discovered and registered as APIServices
 - Auth delegation from openshift-apiserver to vCluster's kube-apiserver
 
 ## What's not yet tested
@@ -123,10 +123,9 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 ├── manifests/                # Manifests applied inside the vCluster
 │   ├── namespace.yaml
 │   ├── service.yaml
-│   ├── endpoints.yaml
-│   └── apiservices.yaml
+│   └── endpoints.yaml
+├── config.yaml                   # Central config (etcd image, ports, API groups, CRDs)
 ├── config/
-│   ├── deploy-config.yaml         # Central config (etcd image, ports, CRD list)
 │   ├── openshift-apiserver.yaml.tpl  # openshift-apiserver config template
 │   └── patch.yaml.tpl             # StatefulSet patch template (etcd + apiserver sidecars)
 ├── hack/
@@ -145,12 +144,37 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 | openshift-apiserver | From OCP 4.21.29 release payload |
 | etcd (sidecar) | v3.5.17 |
 
+## Limitations
+
+### Privileged SCC required on the host
+
+The vCluster syncer creates pods on the host OCP cluster using the `vc-<name>` service account. Workloads inside the vCluster may set arbitrary `runAsUser` values and seccomp profiles that don't match the host namespace's SCC constraints. `deploy.sh` grants `privileged` SCC to the syncer's service account — scoped to the vCluster namespace, not cluster-wide.
+
+### Translate Patches is a Pro feature
+
+vCluster's `sync.toHost.pods.patches` (which could rewrite `runAsUser` to match the host UID range) requires a vCluster Pro license. Without it, the `privileged` SCC grant is the only way to let synced pods pass OCP admission.
+
+### Routes don't reach the outside world
+
+The Route API works inside the vCluster (served by openshift-apiserver), but there is no router/ingress controller to expose Routes externally. The host OCP router doesn't see Routes created inside the vCluster.
+
+**Workaround** — use `kubectl port-forward` to access services directly.
+
+### No openshift-controller-manager
+
+The `openshift-controller-manager` is not deployed. This means ImageStream import from external registries (image resolution, scheduled imports) does not work. ImageStreams with local references work fine.
+
+### Etcd data is ephemeral
+
+The openshift-apiserver's etcd sidecar stores data in an `emptyDir` volume. OpenShift API resources (ImageStreams, Routes, etc.) are lost on pod restart. Use a PVC-backed volume for persistence in production.
+
 ## Key technical decisions
 
 See [design-proposal.md](design-proposal.md) for full details.
 
 - **Separate etcd**: vCluster's kine (SQLite-backed) uses a Unix socket without TLS. openshift-apiserver's etcd client requires TLS. A dedicated etcd sidecar avoids this incompatibility.
-- **Dynamic CRD fetch**: openshift-apiserver hardcodes admission plugins that need certain CRDs. Rather than shipping static stubs, `deploy.sh` fetches the CRD definitions live from the host OCP cluster (listed in `config/deploy-config.yaml`). This keeps them in sync with the host OCP version.
+- **Dynamic CRD fetch**: openshift-apiserver hardcodes admission plugins that need certain CRDs. Rather than shipping static stubs, `deploy.sh` fetches the CRD definitions live from the host OCP cluster (listed in `config.yaml`). This keeps them in sync with the host OCP version.
+- **Dynamic APIService registration**: Rather than maintaining a static list of APIServices, `deploy.sh` queries the openshift-apiserver's `/apis` discovery endpoint and registers an APIService for each group it serves. This adapts automatically to different openshift-apiserver versions.
 - **`insecureSkipTLSVerify`**: APIServices skip TLS verification because traffic is pod-internal. Replace with proper CA trust in production.
 - **Pod IP in Endpoints**: Kubernetes rejects loopback IPs. The Endpoints use the pod's real IP, which changes on restart. `make deploy` handles this automatically.
 

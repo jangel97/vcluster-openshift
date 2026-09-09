@@ -12,3 +12,7 @@ rbac:
     - apiGroups: [""]
       resources: ["endpoints/restricted"]
       verbs: ["create"]
+sync:
+  fromHost:
+    storageClasses:
+      enabled: true

@@ -19,7 +19,7 @@ if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
 fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-CONFIG="$ROOT_DIR/config/deploy-config.yaml"
+CONFIG="$ROOT_DIR/config.yaml"
 
 echo "=== Reading deploy config ==="
 ETCD_IMAGE=$(yq '.etcd.image' "$CONFIG")
@@ -31,6 +31,12 @@ echo "  openshift-apiserver port: $OAS_PORT"
 
 echo "=== Creating namespace ==="
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+echo "=== Granting privileged SCC to vCluster SA ==="
+# Workloads inside vCluster may set arbitrary runAsUser and seccomp profiles.
+# The syncer creates pods on the host as the vc-<name> SA, which needs
+# privileged SCC to pass OCP admission for these pods.
+oc adm policy add-scc-to-user privileged "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Detecting namespace UID range ==="
 RUN_AS_USER=""
@@ -56,7 +62,7 @@ else
 fi
 
 echo "=== Creating vCluster ==="
-if "$VCLUSTER_BIN" list --namespace "$NAMESPACE" 2>/dev/null | grep -q "$VCLUSTER_NAME"; then
+if kubectl get statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" &>/dev/null; then
   echo "vCluster $VCLUSTER_NAME already exists, skipping create."
 else
   "$VCLUSTER_BIN" create "$VCLUSTER_NAME" \
@@ -68,12 +74,12 @@ kubectl rollout status "statefulset/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=12
 
 echo "=== Creating host resources (ConfigMap + Secret) ==="
 TEMPLATE_SED="s|OPENSHIFT_APISERVER_IMAGE|$OPENSHIFT_APISERVER_IMAGE|g"
-TEMPLATE_SED="$TEMPLATE_SED; s/ETCD_IMAGE/$ETCD_IMAGE/g"
-TEMPLATE_SED="$TEMPLATE_SED; s/ETCD_CLIENT_PORT/$ETCD_CLIENT_PORT/g"
-TEMPLATE_SED="$TEMPLATE_SED; s/ETCD_PEER_PORT/$ETCD_PEER_PORT/g"
-TEMPLATE_SED="$TEMPLATE_SED; s/OPENSHIFT_APISERVER_PORT/$OAS_PORT/g"
+TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_IMAGE|$ETCD_IMAGE|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_CLIENT_PORT|$ETCD_CLIENT_PORT|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_PEER_PORT|$ETCD_PEER_PORT|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|OPENSHIFT_APISERVER_PORT|$OAS_PORT|g"
 if [ -n "$RUN_AS_USER" ]; then
-  TEMPLATE_SED="$TEMPLATE_SED; s/RUN_AS_USER/$RUN_AS_USER/g"
+  TEMPLATE_SED="$TEMPLATE_SED; s|RUN_AS_USER|$RUN_AS_USER|g"
 fi
 
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-apiserver.yaml.tpl" > "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml"
@@ -107,7 +113,12 @@ echo "Waiting for vCluster port-forward (pid $CONNECT_PID)..."
 sleep 5
 
 echo "=== Applying in-cluster manifests ==="
-kubectl apply -f "$ROOT_DIR/manifests/namespace.yaml"
+kubectl create namespace openshift-apiserver --dry-run=client -o yaml | kubectl apply -f -
+for i in $(seq 1 10); do
+  kubectl get namespace openshift-apiserver &>/dev/null && break
+  echo "  Waiting for namespace..."
+  sleep 2
+done
 kubectl apply -f "$ROOT_DIR/manifests/service.yaml"
 
 echo "=== Setting up Endpoints ==="
@@ -122,16 +133,65 @@ else
 fi
 
 echo "=== Fetching CRDs from host cluster ==="
-for crd in $(yq '.crds[]' "$CONFIG"); do
+JQ_CLEAN='del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"], .status)'
+
+for crd in $(yq '.crds[]' "$CONFIG" 2>/dev/null); do
   echo "  Fetching $crd..."
-  kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | \
-    jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"], .status)' | \
-    kubectl apply -f -
+  kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply -f -
+done
+
+for group in $(yq '.crdGroups[]' "$CONFIG" 2>/dev/null); do
+  echo "  Fetching all CRDs matching *.$group..."
+  for crd in $(kubectl get crd --context "$HOST_CONTEXT" -o name 2>/dev/null | grep "\.${group}$" | sed 's|customresourcedefinition.apiextensions.k8s.io/||'); do
+    echo "    $crd"
+    kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply -f -
+  done
 done
 sleep 5
 
+echo "=== Copying host resources ==="
+RESOURCE_COUNT=$(yq '.hostResources | length' "$CONFIG" 2>/dev/null || echo 0)
+if [ "$RESOURCE_COUNT" -gt 0 ]; then
+  JQ_CLEAN_RES='del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"])'
+  for idx in $(seq 0 $((RESOURCE_COUNT - 1))); do
+    GROUP=$(yq ".hostResources[$idx].group" "$CONFIG")
+    RESOURCE=$(yq ".hostResources[$idx].resource" "$CONFIG")
+    NAME=$(yq ".hostResources[$idx].name" "$CONFIG")
+    echo "  Copying $RESOURCE/$NAME ($GROUP)..."
+    kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json | \
+      jq "$JQ_CLEAN_RES" | kubectl apply -f -
+    # Copy status subresource if present (e.g. ClusterVersion needs status.history)
+    HAS_STATUS=$(kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json 2>/dev/null | jq 'has("status")')
+    if [ "$HAS_STATUS" = "true" ]; then
+      echo "    Copying status subresource..."
+      kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json | \
+        jq '{apiVersion, kind, metadata: {name: .metadata.name}, status: .status}' | \
+        kubectl replace --subresource=status -f -
+    fi
+  done
+else
+  echo "  No host resources configured, skipping."
+fi
+
 echo "=== Registering APIServices ==="
-kubectl apply -f "$ROOT_DIR/manifests/apiservices.yaml"
+for group in $(yq '.apiGroups[]' "$CONFIG"); do
+  echo "  Registering v1.${group}..."
+  cat <<APISERVICE | kubectl apply -f -
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1.${group}
+spec:
+  group: ${group}
+  version: v1
+  service:
+    namespace: openshift-apiserver
+    name: api
+  groupPriorityMinimum: 9900
+  versionPriority: 15
+  insecureSkipTLSVerify: true
+APISERVICE
+done
 
 echo ""
 echo "=== Deploy complete ==="
