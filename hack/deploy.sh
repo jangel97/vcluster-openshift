@@ -157,6 +157,8 @@ if [ "$RESOURCE_COUNT" -gt 0 ]; then
     GROUP=$(yq ".hostResources[$idx].group" "$CONFIG")
     RESOURCE=$(yq ".hostResources[$idx].resource" "$CONFIG")
     NAME=$(yq ".hostResources[$idx].name" "$CONFIG")
+    echo "  Waiting for $RESOURCE.$GROUP CRD to be established..."
+    kubectl wait --for=condition=Established crd "${RESOURCE}.${GROUP}" --timeout=60s 2>/dev/null || true
     echo "  Copying $RESOURCE/$NAME ($GROUP)..."
     kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json | \
       jq "$JQ_CLEAN_RES" | kubectl apply -f -
