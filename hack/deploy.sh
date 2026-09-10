@@ -33,9 +33,6 @@ echo "=== Creating namespace ==="
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
 echo "=== Granting privileged SCC to vCluster SA ==="
-# Workloads inside vCluster may set arbitrary runAsUser and seccomp profiles.
-# The syncer creates pods on the host as the vc-<name> SA, which needs
-# privileged SCC to pass OCP admission for these pods.
 oc adm policy add-scc-to-user privileged "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Detecting namespace UID range ==="
@@ -54,12 +51,84 @@ if [ -z "$RUN_AS_USER" ]; then
   echo "No OCP UID range annotation found, using defaults."
 fi
 
+echo "=== Fetching CRD stubs from host cluster ==="
+# Collect all CRD names to fetch (individual + group-matched)
+CRD_NAMES=()
+for crd in $(yq '.crds[]' "$CONFIG" 2>/dev/null); do
+  CRD_NAMES+=("$crd")
+done
+for group in $(yq '.crdGroups[]' "$CONFIG" 2>/dev/null); do
+  for crd in $(kubectl get crd --context "$HOST_CONTEXT" -o name 2>/dev/null | grep "\.${group}$" | sed 's|customresourcedefinition.apiextensions.k8s.io/||'); do
+    CRD_NAMES+=("$crd")
+  done
+done
+
+# Generate minimal stub for each CRD and collect into a single manifests block.
+# Minimal stubs use x-kubernetes-preserve-unknown-fields so the vCluster accepts
+# any resource content without needing the full OpenAPI schema (which is often 40KB+
+# and triggers a race condition in the embedded kube-apiserver's CRD registration).
+CRD_MANIFESTS=""
+for crd in "${CRD_NAMES[@]}"; do
+  echo "  Generating stub for $crd"
+  STUB=$(kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq -r '
+    {
+      apiVersion: "apiextensions.k8s.io/v1",
+      kind: "CustomResourceDefinition",
+      metadata: { name: .metadata.name },
+      spec: {
+        group: .spec.group,
+        names: .spec.names,
+        scope: .spec.scope,
+        versions: [.spec.versions[] | {
+          name: .name,
+          served: .served,
+          storage: .storage,
+          subresources: (.subresources // null),
+          schema: {
+            openAPIV3Schema: {
+              type: "object",
+              properties: {
+                spec: { type: "object", "x-kubernetes-preserve-unknown-fields": true },
+                status: { type: "object", "x-kubernetes-preserve-unknown-fields": true }
+              }
+            }
+          }
+        }]
+      }
+    }
+  ' | yq -P)
+
+  if [ -n "$CRD_MANIFESTS" ]; then
+    CRD_MANIFESTS="${CRD_MANIFESTS}
+---
+${STUB}"
+  else
+    CRD_MANIFESTS="$STUB"
+  fi
+done
+
+echo "  Generated ${#CRD_NAMES[@]} CRD stubs"
+
 echo "=== Generating vCluster values ==="
 if [ -n "$RUN_AS_USER" ]; then
   sed "s/RUN_AS_USER/$RUN_AS_USER/g" "$ROOT_DIR/chart/vcluster-values.yaml.tpl" > "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml"
 else
   sed '/RUN_AS_USER/d; /runAsUser/d; /fsGroup/d' "$ROOT_DIR/chart/vcluster-values.yaml.tpl" > "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml"
 fi
+
+# Inject CRD manifests into the values file, indented to match the YAML block scalar
+INDENTED_MANIFESTS=$(echo "$CRD_MANIFESTS" | sed 's/^/        /')
+ESCAPED_MANIFESTS=$(echo "$INDENTED_MANIFESTS" | sed 's/[&/\]/\\&/g')
+
+# Use a python one-liner for safe multi-line replacement (sed struggles with newlines)
+python3 -c "
+import sys
+vals = open(sys.argv[1]).read()
+manifests = open(sys.argv[2]).read()
+indented = '\n'.join('        ' + line if line.strip() else '' for line in manifests.splitlines())
+vals = vals.replace('        VCLUSTER_CRD_MANIFESTS', indented)
+open(sys.argv[1], 'w').write(vals)
+" "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml" <(echo "$CRD_MANIFESTS")
 
 echo "=== Creating vCluster ==="
 if kubectl get statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" &>/dev/null; then
@@ -132,22 +201,19 @@ else
   kubectl apply -f "$ROOT_DIR/manifests/endpoints.yaml"
 fi
 
-echo "=== Fetching CRDs from host cluster ==="
-JQ_CLEAN='del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .metadata.managedFields, .metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"], .status)'
-
-for crd in $(yq '.crds[]' "$CONFIG" 2>/dev/null); do
-  echo "  Fetching $crd..."
-  kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply --server-side --force-conflicts -f -
-done
-
-for group in $(yq '.crdGroups[]' "$CONFIG" 2>/dev/null); do
-  echo "  Fetching all CRDs matching *.$group..."
-  for crd in $(kubectl get crd --context "$HOST_CONTEXT" -o name 2>/dev/null | grep "\.${group}$" | sed 's|customresourcedefinition.apiextensions.k8s.io/||'); do
-    echo "    $crd"
-    kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq "$JQ_CLEAN" | kubectl apply --server-side --force-conflicts -f -
+echo "=== Verifying CRDs ==="
+for crd in "${CRD_NAMES[@]}"; do
+  for attempt in $(seq 1 15); do
+    if kubectl get crd "$crd" &>/dev/null; then
+      echo "  OK $crd"
+      break
+    fi
+    if [ "$attempt" -eq 15 ]; then
+      echo "  MISSING $crd"
+    fi
+    sleep 2
   done
 done
-sleep 5
 
 echo "=== Copying host resources ==="
 RESOURCE_COUNT=$(yq '.hostResources | length' "$CONFIG" 2>/dev/null || echo 0)
@@ -158,11 +224,16 @@ if [ "$RESOURCE_COUNT" -gt 0 ]; then
     RESOURCE=$(yq ".hostResources[$idx].resource" "$CONFIG")
     NAME=$(yq ".hostResources[$idx].name" "$CONFIG")
     echo "  Waiting for $RESOURCE.$GROUP CRD to be established..."
-    kubectl wait --for=condition=Established crd "${RESOURCE}.${GROUP}" --timeout=60s 2>/dev/null || true
+    for attempt in $(seq 1 30); do
+      if kubectl wait --for=condition=Established crd "${RESOURCE}.${GROUP}" --timeout=5s 2>/dev/null; then
+        break
+      fi
+      echo "    CRD not ready yet (attempt $attempt/30)..."
+      sleep 3
+    done
     echo "  Copying $RESOURCE/$NAME ($GROUP)..."
     kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json | \
       jq "$JQ_CLEAN_RES" | kubectl apply -f -
-    # Copy status subresource if present (e.g. ClusterVersion needs status.history)
     HAS_STATUS=$(kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json 2>/dev/null | jq 'has("status")')
     if [ "$HAS_STATUS" = "true" ]; then
       echo "    Copying status subresource..."

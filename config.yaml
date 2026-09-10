@@ -29,14 +29,12 @@ crds:
   - securitycontextconstraints.security.openshift.io
 
 # Fetch ALL CRDs matching these group suffixes from the host.
-# Avoids listing dozens of CRDs individually.
 crdGroups:
   - config.openshift.io
-  - operator.openshift.io
+  #- operator.openshift.io
   - monitoring.coreos.com
 
-# Resources to copy from the host OCP cluster into the vCluster.
-# Unlike CRDs (schemas), these are actual cluster objects that workloads query.
+# Resources to copy from the host OCP cluster into the vCluster
 hostResources:
   - group: config.openshift.io
     resource: clusterversions

@@ -1,39 +1,42 @@
 # vcluster-openshift
 
-Run OpenShift APIs (ImageStream, Route, Build, DeploymentConfig, Project, Template) inside a [vCluster](https://www.vcluster.com/) by running `openshift-apiserver` as an aggregated API server alongside `kube-apiserver`.
+OpenShift APIs (ImageStream, Route, Build, and more) inside a [vCluster](https://www.vcluster.com/), powered by `openshift-apiserver` running as a sidecar.
+
+**The problem.** vCluster gives you lightweight, isolated Kubernetes clusters on top of a host cluster. But it runs vanilla k8s. If your workloads depend on OpenShift-specific APIs like ImageStream or Route, they simply won't work. These APIs live inside the `openshift-apiserver` binary; they aren't CRDs and you can't install them separately.
+
+**What this project does.** We run `openshift-apiserver` as a sidecar in the vCluster pod, with its own dedicated etcd. It plugs into the vCluster's kube-apiserver through standard [API aggregation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/apiserver-aggregation/), so `kubectl get imagestreams` works exactly as you'd expect. We also pull in CRDs, cluster resources, and config from the host OCP cluster so that operators like ODH think they're on real OpenShift.
+
+**Why we built it.** We're working on a platform (GPUaaS) that provisions isolated OpenShift-like environments with GPU access for AI/ML tenants. Spinning up a full OCP cluster per tenant is expensive. vCluster is much lighter, but tenants need RHOAI for notebook workbenches, and RHOAI needs OpenShift APIs. This project fills that gap.
 
 **Status**: Proof of concept validated. ImageStream CRUD works end-to-end inside vCluster.
 
 Related: [vCluster issue #509 — OpenShift support](https://github.com/loft-sh/vcluster/issues/509) | [Design proposal](design-proposal.md)
 
-## Why
+## Background
 
-vCluster runs vanilla Kubernetes. Workloads that depend on OpenShift-native APIs — particularly **ImageStream** (`image.openshift.io/v1`) — cannot run inside vCluster. ImageStream is compiled into the `openshift-apiserver` binary; it is not a CRD and cannot be installed separately.
+vCluster runs vanilla Kubernetes under the hood. Any workload that depends on OpenShift-native APIs — particularly **ImageStream** (`image.openshift.io/v1`) — simply can't run inside it. ImageStream isn't a CRD you can install; it's compiled directly into the `openshift-apiserver` binary.
 
-This blocks:
-- **RHOAI/ODH** workbenches (use ImageStreams for notebook images)
-- **OpenShift Builds** (Source-to-Image depends on ImageStreams)
-- Any workload that assumes OpenShift API availability
+This blocks a lot of real-world workloads:
 
-This project adds OpenShift API support by running `openshift-apiserver` as a sidecar in the vCluster StatefulSet pod, using standard [Kubernetes API aggregation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/apiserver-aggregation/).
+- **RHOAI/ODH** workbenches use ImageStreams to track notebook images
+- **OpenShift Builds** (Source-to-Image) depend on ImageStreams
+- Anything that assumes OpenShift API availability
 
-## Motivation: RHOAI on vCluster
+We solve this by running `openshift-apiserver` as a sidecar in the vCluster StatefulSet pod, wired in through standard [Kubernetes API aggregation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/apiserver-aggregation/).
 
-[Red Hat OpenShift AI (RHOAI)](https://www.redhat.com/en/technologies/cloud-computing/openshift/openshift-ai) and its upstream [Open Data Hub (ODH)](https://opendatahub.io/) create and manage ImageStreams to track notebook images for workbenches. On vanilla vCluster, RHOAI installation fails because the ImageStream API doesn't exist.
+## Why not just use a CRD?
 
-We evaluated three approaches:
+We spent time looking at lighter alternatives before committing to the sidecar approach. Here's what we considered:
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **1. openshift-apiserver sidecar** (this repo) | Full API fidelity — server-side image resolution, import logic, ImageStreamTag virtual resources all work. Drop-in compatible with any OpenShift client. | Heavier: requires a dedicated etcd sidecar + the apiserver container. |
-| **2. CRD generated from `openshift/api` Go types** | Lighter — no sidecar. Schema matches upstream since it's derived from the official types via `controller-gen`. | CRD-backed storage has no server-side behavior: no image resolution, no digest lookups, no import triggers. ImageStreamTag is a virtual resource computed on the fly by openshift-apiserver — a CRD can't replicate it. |
-| **3. Hand-written minimal CRD** | Simplest — only the fields RHOAI reads (`spec.tags[].from`, `spec.lookupPolicy`, `status.tags`). | Diverges from upstream schema. Breaks if RHOAI ever accesses a field not in the stub. |
+| Approach | What's good | What breaks |
+|----------|-------------|-------------|
+| **openshift-apiserver sidecar** (this repo) | Full API fidelity — image resolution, import logic, ImageStreamTag virtual resources all work out of the box. Drop-in for any OpenShift client. | Heavier: needs a dedicated etcd sidecar + the apiserver container. |
+| **CRD from `openshift/api` Go types** | Lighter — no sidecar. Schema matches upstream since it comes from the official types via `controller-gen`. | No server-side behavior: no image resolution, no digest lookups, no import triggers. ImageStreamTag is a virtual resource that only openshift-apiserver can serve. |
+| **Hand-written minimal CRD** | Simplest — just the fields RHOAI actually reads. | Diverges from upstream. Breaks the moment RHOAI touches a field you didn't stub. |
 
-We chose **approach 1** because:
-- RHOAI doesn't just read ImageStreams — it creates them and expects `status` fields to be populated by server-side logic.
-- ImageStreamTag (used by workbench image selectors) is a virtual sub-resource that only openshift-apiserver can serve.
-- No project in the OpenShift ecosystem (MicroShift, OKD, CRC) has ever replaced openshift-apiserver with a CRD — if it were viable, someone would have done it.
-- The sidecar overhead is bounded: two containers (etcd + apiserver) in the same pod, no extra nodes or network hops.
+We went with the sidecar because RHOAI doesn't just read ImageStreams — it creates them and expects `status` fields populated by server-side logic. ImageStreamTag (used by workbench image selectors) is a virtual sub-resource that only openshift-apiserver can serve. And tellingly, no project in the OpenShift ecosystem (MicroShift, OKD, CRC) has ever replaced openshift-apiserver with a CRD. If it were viable, someone would have done it by now.
+
+The overhead is bounded: two extra containers (etcd + apiserver) in the same pod. No extra nodes, no network hops.
 
 ## Architecture
 
@@ -48,17 +51,19 @@ vCluster StatefulSet pod
 
 Inside vCluster:
 ├── APIServices auto-discovered from openshift-apiserver and registered dynamically
-└── 6 CRDs fetched from host (admission plugin informer dependencies, configured in config.yaml)
+└── CRDs + cluster resources fetched from the host OCP cluster (configured in config.yaml)
 ```
+
+Everything runs in a single pod. The openshift-apiserver talks to its own etcd over localhost, delegates authentication back to the vCluster's kube-apiserver, and registers itself through standard APIService objects. From the perspective of anything running inside the vCluster, the OpenShift APIs just exist.
 
 ## Prerequisites
 
 - OpenShift cluster (tested on OCP 4.21)
 - `vcluster` CLI ([install](https://www.vcluster.com/docs/getting-started/setup))
 - `kubectl` with access to the OCP cluster
-- `yq` ([install](https://github.com/mikefarah/yq)) (for reading deploy config)
-- `jq` (for cleaning CRD metadata during fetch)
-- `openssl` (for generating serving certs)
+- `yq` ([install](https://github.com/mikefarah/yq)) for reading deploy config
+- `jq` for cleaning CRD metadata during fetch
+- `openssl` for generating serving certs
 
 ## Quickstart
 
@@ -78,7 +83,7 @@ make teardown
 
 ### Configuration
 
-Override defaults via environment variables:
+You can override defaults with environment variables:
 
 ```bash
 NAMESPACE=my-vcluster VCLUSTER_NAME=my-ocp OPENSHIFT_APISERVER_IMAGE=<image> make deploy
@@ -92,23 +97,23 @@ NAMESPACE=my-vcluster VCLUSTER_NAME=my-ocp OPENSHIFT_APISERVER_IMAGE=<image> mak
 | `VCLUSTER_BIN` | `vcluster` | Path to vcluster binary |
 | `HOST_CONTEXT` | current context | kubectl context for the host cluster |
 
-### On OpenShift with restricted UIDs
+### OpenShift with restricted UIDs
 
 UID ranges are auto-detected from the namespace annotation during deploy. No manual configuration needed.
 
 ## What works
 
 - `kubectl get imagestreams` inside the vCluster
-- ImageStream creation, update, deletion
+- ImageStream create, update, delete
 - OpenShift API groups auto-discovered and registered as APIServices
 - Auth delegation from openshift-apiserver to vCluster's kube-apiserver
 
 ## What's not yet tested
 
-- Route creation (APIService registered, no ingress controller)
-- ODH/RHOAI workbenches using these ImageStreams
+- Route creation (the APIService is registered, but there's no ingress controller)
+- ODH/RHOAI workbenches actually using these ImageStreams
 - `openshift-controller-manager` (needed for ImageStream import from external registries)
-- Persistence across pod restarts (etcd data is in emptyDir)
+- Persistence across pod restarts (etcd data lives in emptyDir)
 
 ## Repo structure
 
@@ -124,10 +129,10 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 │   ├── namespace.yaml
 │   ├── service.yaml
 │   └── endpoints.yaml
-├── config.yaml                   # Central config (etcd image, ports, API groups, CRDs)
+├── config.yaml               # Central config (etcd image, ports, API groups, CRDs)
 ├── config/
 │   ├── openshift-apiserver.yaml.tpl  # openshift-apiserver config template
-│   └── patch.yaml.tpl             # StatefulSet patch template (etcd + apiserver sidecars)
+│   └── patch.yaml.tpl               # StatefulSet patch template (sidecars)
 ├── hack/
 │   └── generate-cert.sh      # Generate self-signed serving cert
 └── examples/
@@ -146,9 +151,11 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 
 ## Limitations
 
+Things we've hit that you should know about.
+
 ### Privileged SCC required on the host
 
-The vCluster syncer creates pods on the host OCP cluster using the `vc-<name>` service account. Workloads inside the vCluster may set arbitrary `runAsUser` values and seccomp profiles that don't match the host namespace's SCC constraints. `deploy.sh` grants `privileged` SCC to the syncer's service account — scoped to the vCluster namespace, not cluster-wide.
+The vCluster syncer creates pods on the host OCP cluster using the `vc-<name>` service account. Workloads inside the vCluster may set arbitrary `runAsUser` values and seccomp profiles that don't match the host namespace's SCC constraints. The deploy script grants `privileged` SCC to the syncer's service account — scoped to the vCluster namespace, not cluster-wide.
 
 ### Translate Patches is a Pro feature
 
@@ -156,27 +163,27 @@ vCluster's `sync.toHost.pods.patches` (which could rewrite `runAsUser` to match 
 
 ### Routes don't reach the outside world
 
-The Route API works inside the vCluster (served by openshift-apiserver), but there is no router/ingress controller to expose Routes externally. The host OCP router doesn't see Routes created inside the vCluster.
+The Route API works inside the vCluster (openshift-apiserver serves it), but there's no router or ingress controller to actually expose Routes externally. The host OCP router can't see Routes created inside the vCluster.
 
-**Workaround** — use `kubectl port-forward` to access services directly.
+Use `kubectl port-forward` to access services directly.
 
 ### No openshift-controller-manager
 
-The `openshift-controller-manager` is not deployed. This means ImageStream import from external registries (image resolution, scheduled imports) does not work. ImageStreams with local references work fine.
+We don't deploy the `openshift-controller-manager`. That means ImageStream import from external registries (image resolution, scheduled imports) doesn't work. ImageStreams with local references are fine.
 
 ### Etcd data is ephemeral
 
-The openshift-apiserver's etcd sidecar stores data in an `emptyDir` volume. OpenShift API resources (ImageStreams, Routes, etc.) are lost on pod restart. Use a PVC-backed volume for persistence in production.
+The openshift-apiserver's etcd sidecar stores data in an `emptyDir` volume. All OpenShift API resources (ImageStreams, Routes, etc.) are lost when the pod restarts. For anything beyond a PoC, back this with a PVC.
 
 ## Key technical decisions
 
-See [design-proposal.md](design-proposal.md) for full details.
+See [design-proposal.md](design-proposal.md) for the full story. The short version:
 
-- **Separate etcd**: vCluster's kine (SQLite-backed) uses a Unix socket without TLS. openshift-apiserver's etcd client requires TLS. A dedicated etcd sidecar avoids this incompatibility.
-- **Dynamic CRD fetch**: openshift-apiserver hardcodes admission plugins that need certain CRDs. Rather than shipping static stubs, `deploy.sh` fetches the CRD definitions live from the host OCP cluster (listed in `config.yaml`). This keeps them in sync with the host OCP version.
-- **Dynamic APIService registration**: Rather than maintaining a static list of APIServices, `deploy.sh` queries the openshift-apiserver's `/apis` discovery endpoint and registers an APIService for each group it serves. This adapts automatically to different openshift-apiserver versions.
-- **`insecureSkipTLSVerify`**: APIServices skip TLS verification because traffic is pod-internal. Replace with proper CA trust in production.
-- **Pod IP in Endpoints**: Kubernetes rejects loopback IPs. The Endpoints use the pod's real IP, which changes on restart. `make deploy` handles this automatically.
+- **Separate etcd**: vCluster's kine (SQLite-backed) uses a Unix socket without TLS. openshift-apiserver's etcd client requires TLS. Rather than fighting that mismatch, we run a dedicated etcd sidecar.
+- **Dynamic CRD fetch**: openshift-apiserver hardcodes admission plugins that need certain CRDs to exist. Instead of shipping static stubs that drift out of sync, `deploy.sh` fetches CRD definitions live from the host cluster. What to fetch is configured in `config.yaml`.
+- **Dynamic APIService registration**: Rather than maintaining a static list, `deploy.sh` queries the openshift-apiserver's `/apis` discovery endpoint and registers an APIService for each group it finds. This adapts automatically when different openshift-apiserver versions serve different groups.
+- **`insecureSkipTLSVerify` on APIServices**: All traffic is pod-internal (localhost), so we skip TLS verification. Replace with proper CA trust for production.
+- **Pod IP in Endpoints**: Kubernetes rejects loopback IPs in Endpoints objects. We use the pod's real IP, which changes on restart. `make deploy` handles this automatically.
 
 ## License
 

@@ -1,5 +1,9 @@
 controlPlane:
   statefulSet:
+    image:
+      registry: ghcr.io
+      repository: loft-sh/vcluster-oss
+      tag: 0.37.0
     security:
       podSecurityContext:
         fsGroup: RUN_AS_USER
@@ -16,3 +20,8 @@ sync:
   fromHost:
     storageClasses:
       enabled: true
+experimental:
+  deploy:
+    vcluster:
+      manifests: |-
+        VCLUSTER_CRD_MANIFESTS

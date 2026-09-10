@@ -75,7 +75,7 @@ spec:
             cpu: 10m
             memory: 120Mi
         securityContext:
-          runAsNonRoot: true
+          runAsNonRoot: false
         volumeMounts:
         - name: signing-key
           mountPath: /var/run/secrets/signing-key

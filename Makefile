@@ -15,8 +15,8 @@ deploy: generate-cert ## Deploy vCluster with OpenShift APIs (full end-to-end)
 teardown: ## Tear down vCluster and clean up
 	-$(VCLUSTER_BIN) disconnect 2>/dev/null
 	-pkill -f "vcluster connect $(VCLUSTER_NAME)" 2>/dev/null
-	$(VCLUSTER_BIN) delete $(VCLUSTER_NAME) --namespace $(NAMESPACE)
-	kubectl delete namespace $(NAMESPACE)
+	-$(VCLUSTER_BIN) delete $(VCLUSTER_NAME) --namespace $(NAMESPACE)
+	-kubectl delete namespace $(NAMESPACE)
 
 verify: ## Verify OpenShift APIs are working
 	@echo "=== Checking APIServices ==="
