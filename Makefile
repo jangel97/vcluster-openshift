@@ -3,14 +3,15 @@ VCLUSTER_NAME          ?= ocp
 VCLUSTER_BIN           ?= vcluster
 HOST_CONTEXT           ?= $(shell kubectl config current-context)
 OPENSHIFT_APISERVER_IMAGE ?=
+RESOURCE_SYNCER_IMAGE     ?=
 
-.PHONY: deploy teardown verify generate-cert help
+.PHONY: deploy teardown verify generate-cert build-plugin push-plugin help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 deploy: generate-cert ## Deploy vCluster with OpenShift APIs (full end-to-end)
-	@bash hack/deploy.sh "$(NAMESPACE)" "$(VCLUSTER_NAME)" "$(VCLUSTER_BIN)" "$(HOST_CONTEXT)" "$(OPENSHIFT_APISERVER_IMAGE)"
+	@bash hack/deploy.sh "$(NAMESPACE)" "$(VCLUSTER_NAME)" "$(VCLUSTER_BIN)" "$(HOST_CONTEXT)" "$(OPENSHIFT_APISERVER_IMAGE)" "$(RESOURCE_SYNCER_IMAGE)"
 
 teardown: ## Tear down vCluster and clean up
 	-$(VCLUSTER_BIN) disconnect 2>/dev/null
@@ -36,3 +37,8 @@ generate-cert: ## Generate self-signed TLS cert (if not present)
 		echo "TLS cert already exists, skipping."; \
 	fi
 
+build-plugin: ## Build route-syncer plugin image
+	cd plugins/resource-syncer && docker build -t $(RESOURCE_SYNCER_IMAGE) .
+
+push-plugin: build-plugin ## Build and push route-syncer plugin image
+	docker push $(RESOURCE_SYNCER_IMAGE)

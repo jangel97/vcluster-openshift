@@ -31,7 +31,8 @@ crds:
 # Fetch ALL CRDs matching these group suffixes from the host.
 crdGroups:
   - config.openshift.io
-  #- operator.openshift.io
+  - operator.openshift.io
+  - console.openshift.io
   - monitoring.coreos.com
 
 # Resources to copy from the host OCP cluster into the vCluster
@@ -39,3 +40,12 @@ hostResources:
   - group: config.openshift.io
     resource: clusterversions
     name: version
+  - group: config.openshift.io
+    resource: authentications
+    name: cluster
+  - group: config.openshift.io
+    resource: ingresses
+    name: cluster
+  - group: config.openshift.io
+    resource: infrastructures
+    name: cluster

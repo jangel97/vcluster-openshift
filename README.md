@@ -96,6 +96,7 @@ NAMESPACE=my-vcluster VCLUSTER_NAME=my-ocp OPENSHIFT_APISERVER_IMAGE=<image> mak
 | `VCLUSTER_NAME` | `ocp` | vCluster name |
 | `VCLUSTER_BIN` | `vcluster` | Path to vcluster binary |
 | `HOST_CONTEXT` | current context | kubectl context for the host cluster |
+| `RESOURCE_SYNCER_IMAGE` | *(optional)* | Resource syncer plugin image (enables syncing resources like Routes to host) |
 
 ### OpenShift with restricted UIDs
 
@@ -133,6 +134,12 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 ├── config/
 │   ├── openshift-apiserver.yaml.tpl  # openshift-apiserver config template
 │   └── patch.yaml.tpl               # StatefulSet patch template (sidecars)
+├── plugins/
+│   └── resource-syncer/      # vCluster plugin: syncs configured resources to host cluster
+│       ├── main.go
+│       ├── pkg/              # Generic syncer framework
+│       ├── syncers/route.go  # Route-specific syncer (service name translation)
+│       └── Dockerfile
 ├── hack/
 │   └── generate-cert.sh      # Generate self-signed serving cert
 └── examples/
@@ -161,11 +168,23 @@ The vCluster syncer creates pods on the host OCP cluster using the `vc-<name>` s
 
 vCluster's `sync.toHost.pods.patches` (which could rewrite `runAsUser` to match the host UID range) requires a vCluster Pro license. Without it, the `privileged` SCC grant is the only way to let synced pods pass OCP admission.
 
-### Routes don't reach the outside world
+### Resource syncer plugin
 
-The Route API works inside the vCluster (openshift-apiserver serves it), but there's no router or ingress controller to actually expose Routes externally. The host OCP router can't see Routes created inside the vCluster.
+Resources created inside the vCluster (Routes, etc.) are invisible to the host cluster. The **resource-syncer plugin** syncs configured resources from the vCluster to the host cluster. Which resources to sync is specified in the plugin config.
 
-Use `kubectl port-forward` to access services directly.
+```bash
+# Build the plugin
+make build-plugin RESOURCE_SYNCER_IMAGE=quay.io/<org>/vcluster-resource-syncer:latest
+make push-plugin
+
+# Deploy with plugin enabled
+RESOURCE_SYNCER_IMAGE=quay.io/<org>/vcluster-resource-syncer:latest \
+OPENSHIFT_APISERVER_IMAGE=... make deploy
+```
+
+Resources with a registered typed syncer (like Routes) get special handling — e.g., Service name translation for Route backends. Everything else gets a generic syncer that copies spec and status.
+
+Without the plugin, resources exist in the vCluster API but aren't visible on the host. Use `kubectl port-forward` to access services directly in that case.
 
 ### No openshift-controller-manager
 

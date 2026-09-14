@@ -6,6 +6,7 @@ VCLUSTER_NAME="$2"
 VCLUSTER_BIN="$3"
 HOST_CONTEXT="$4"
 OPENSHIFT_APISERVER_IMAGE="$5"
+RESOURCE_SYNCER_IMAGE="${6:-}"
 
 if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
   echo "ERROR: OPENSHIFT_APISERVER_IMAGE is required."
@@ -120,6 +121,20 @@ fi
 INDENTED_MANIFESTS=$(echo "$CRD_MANIFESTS" | sed 's/^/        /')
 ESCAPED_MANIFESTS=$(echo "$INDENTED_MANIFESTS" | sed 's/[&/\]/\\&/g')
 
+# Strip plugin block if no resource-syncer image provided
+if [ -z "$RESOURCE_SYNCER_IMAGE" ]; then
+  python3 -c "
+import sys, re
+vals = open(sys.argv[1]).read()
+vals = re.sub(r'plugins:.*?(?=\n\S)', '', vals, flags=re.DOTALL)
+open(sys.argv[1], 'w').write(vals)
+" "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml"
+  echo "  Resource syncer plugin: disabled (no image provided)"
+else
+  sed -i'' -e "s|RESOURCE_SYNCER_IMAGE|$RESOURCE_SYNCER_IMAGE|g" "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml"
+  echo "  Resource syncer plugin: $RESOURCE_SYNCER_IMAGE"
+fi
+
 # Use a python one-liner for safe multi-line replacement (sed struggles with newlines)
 python3 -c "
 import sys
@@ -130,15 +145,12 @@ vals = vals.replace('        VCLUSTER_CRD_MANIFESTS', indented)
 open(sys.argv[1], 'w').write(vals)
 " "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml" <(echo "$CRD_MANIFESTS")
 
-echo "=== Creating vCluster ==="
-if kubectl get statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" &>/dev/null; then
-  echo "vCluster $VCLUSTER_NAME already exists, skipping create."
-else
-  "$VCLUSTER_BIN" create "$VCLUSTER_NAME" \
-    --namespace "$NAMESPACE" \
-    --values "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml" \
-    --connect=false
-fi
+echo "=== Creating/upgrading vCluster ==="
+"$VCLUSTER_BIN" create "$VCLUSTER_NAME" \
+  --namespace "$NAMESPACE" \
+  --values "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml" \
+  --connect=false \
+  --upgrade
 kubectl rollout status "statefulset/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=120s
 
 echo "=== Creating host resources (ConfigMap + Secret) ==="
@@ -239,7 +251,7 @@ if [ "$RESOURCE_COUNT" -gt 0 ]; then
       echo "    Copying status subresource..."
       kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json | \
         jq '{apiVersion, kind, metadata: {name: .metadata.name}, status: .status}' | \
-        kubectl replace --subresource=status -f -
+        kubectl replace --subresource=status -f - 2>/dev/null || echo "    (status subresource not available, skipping)"
     fi
   done
 else

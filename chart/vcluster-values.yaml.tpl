@@ -1,4 +1,9 @@
 controlPlane:
+  distro:
+    k8s:
+      apiServer:
+        extraArgs:
+          - --enable-aggregator-routing=true
   statefulSet:
     image:
       registry: ghcr.io
@@ -16,10 +21,27 @@ rbac:
     - apiGroups: [""]
       resources: ["endpoints/restricted"]
       verbs: ["create"]
+    - apiGroups: ["discovery.k8s.io"]
+      resources: ["endpointslices/restricted"]
+      verbs: ["create"]
 sync:
   fromHost:
     storageClasses:
       enabled: true
+plugins:
+  resource-syncer:
+    image: RESOURCE_SYNCER_IMAGE
+    imagePullPolicy: Always
+    config:
+      resources:
+        - apiVersion: route.openshift.io/v1
+          kind: Route
+    rbac:
+      role:
+        extraRules:
+          - apiGroups: ["route.openshift.io"]
+            resources: ["routes", "routes/status"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 experimental:
   deploy:
     vcluster:
