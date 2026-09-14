@@ -40,22 +40,44 @@ On real OCP, the `service-ca-operator` runs in `openshift-service-ca` and signs 
 - Any trust chain that works on the host works inside the vCluster
 - No cert-manager needed — same annotation-based flow as real OCP
 
-## Limitations
+## Known issues
 
-### Routes don't reach the outside world
+### Notebook image tags
 
-ODH dashboard creates a Route inside the vCluster. The Route API works (served by openshift-apiserver), but there's no router/ingress controller inside the vCluster to expose it externally. The host OCP router doesn't see Routes created inside the vCluster.
-
-**Workaround** — use port-forward to access the dashboard:
+The RHOAI notebook images on `quay.io/modh/` use date-based tags (e.g., `v3-20250827`), not the `v3-2025a-YYYYMMDD` format. Check available tags before creating a Notebook:
 
 ```bash
-kubectl port-forward svc/odh-dashboard -n opendatahub 8443:8443
-# Open https://localhost:8443
+skopeo list-tags docker://quay.io/modh/odh-minimal-notebook-container | jq '.Tags[]' | sort | tail -10
 ```
 
-A proper fix would be a Route syncer (vCluster plugin or controller) that copies Routes from the vCluster to the host namespace where the OCP router can pick them up. This is not yet implemented.
+### Notebook PVCs need fsGroup
+
+Notebook pods run under OCP's SCC-assigned UID (e.g., `1000900000`), but PVC mounts default to root ownership. Without `fsGroup`, the notebook crashes with `PermissionError` when writing to the workspace volume.
+
+Set `fsGroup: 0` in the Notebook CR's pod securityContext:
+
+```yaml
+spec:
+  template:
+    spec:
+      securityContext:
+        fsGroup: 0
+```
+
+On real OCP the restricted SCC sets fsGroup automatically from the namespace's supplemental group range. In the vCluster this doesn't happen, so it must be set explicitly.
+
+### No OAuth server
+
+The vCluster runs vanilla Kubernetes — there's no OpenShift OAuth server. The ODH dashboard's oauth-proxy sidecar can't authenticate users, so "Login with OpenShift" returns a 403/500.
+
+**Workaround** — access the dashboard directly on port 8080 (bypassing oauth-proxy) via port-forward, or create a Route targeting port 8080 with edge TLS.
+
+### Routes
+
+Routes created inside the vCluster are invisible to the host OCP router. Deploy with the `resource-syncer` plugin (see root README) to sync Routes to the host, or create them manually on the host namespace.
 
 ## What's next after setup
 
 1. Create a `DSCInitialization` and `DataScienceCluster` to enable ODH components
-2. Create a workbench and verify it can use ImageStreams for notebook images
+2. Create a workbench namespace and Notebook CR (remember to set `fsGroup: 0`)
+3. Verify the notebook pod starts and can run workloads
