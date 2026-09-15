@@ -11,6 +11,10 @@ etcd:
 openshiftApiserver:
   port: 8444
 
+# nginx reverse proxy for OAuth metadata discovery
+nginx:
+  image: nginxinc/nginx-unprivileged:1.27-alpine
+
 # API groups served by openshift-apiserver.
 # An APIService is registered for each group inside the vCluster.
 apiGroups:
@@ -27,6 +31,7 @@ apiGroups:
 crds:
   - clusterresourcequotas.quota.openshift.io
   - securitycontextconstraints.security.openshift.io
+  - oauthclients.oauth.openshift.io
 
 # Fetch ALL CRDs matching these group suffixes from the host.
 crdGroups:

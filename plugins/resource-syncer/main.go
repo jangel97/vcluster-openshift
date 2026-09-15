@@ -12,7 +12,8 @@ import (
 )
 
 var typedSyncers = map[schema.GroupVersionKind]func(*synccontext.RegisterContext) syncertypes.Base{
-	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}: syncers.NewRouteSyncer,
+	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}:   syncers.NewRouteSyncer,
+	{Group: "oauth.openshift.io", Version: "v1", Kind: "OAuthClient"}: syncers.NewOAuthClientSyncer,
 }
 
 func main() {

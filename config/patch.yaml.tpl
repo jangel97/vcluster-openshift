@@ -44,7 +44,7 @@ spec:
         - name: KUBERNETES_SERVICE_HOST
           value: "127.0.0.1"
         - name: KUBERNETES_SERVICE_PORT
-          value: "6443"
+          value: "6444"
         ports:
         - containerPort: OPENSHIFT_APISERVER_PORT
           name: https
@@ -59,6 +59,26 @@ spec:
           name: openshift-apiserver-config
         - mountPath: /var/serving-cert
           name: openshift-apiserver-serving-cert
+      - name: oauth-metadata-proxy
+        image: NGINX_IMAGE
+        ports:
+        - containerPort: 6443
+          name: oauth-proxy
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: RUN_AS_USER
+        volumeMounts:
+        - mountPath: /data
+          name: data
+          readOnly: true
+        - mountPath: /etc/nginx/nginx.conf
+          name: nginx-config
+          subPath: nginx.conf
+          readOnly: true
+        - mountPath: /var/oauth-metadata
+          name: oauth-metadata
+          readOnly: true
       volumes:
       - name: openshift-apiserver-config
         configMap:
@@ -68,3 +88,9 @@ spec:
           secretName: openshift-apiserver-serving-cert
       - name: openshift-etcd-data
         emptyDir: {}
+      - name: nginx-config
+        configMap:
+          name: oauth-metadata-proxy-config
+      - name: oauth-metadata
+        configMap:
+          name: oauth-metadata

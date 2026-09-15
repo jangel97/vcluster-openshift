@@ -19,13 +19,18 @@ import (
 )
 
 type SyncerConfig[T client.Object] struct {
-	Name       string
-	Object     T
-	SyncFields func(ctx *synccontext.SyncContext, host, virtual T)
+	Name         string
+	Object       T
+	SyncFields   func(ctx *synccontext.SyncContext, host, virtual T)
+	HostNameFunc generic.PhysicalNameFunc
 }
 
 func NewSyncer[T client.Object](ctx *synccontext.RegisterContext, cfg SyncerConfig[T]) syncertypes.Base {
-	mapper, err := generic.NewMapper(ctx, cfg.Object, translate.Default.HostName)
+	nameFunc := cfg.HostNameFunc
+	if nameFunc == nil {
+		nameFunc = translate.Default.HostName
+	}
+	mapper, err := generic.NewMapper(ctx, cfg.Object, nameFunc)
 	if err != nil {
 		panic(fmt.Sprintf("create %s mapper: %v", cfg.Name, err))
 	}
@@ -36,6 +41,10 @@ func NewSyncer[T client.Object](ctx *synccontext.RegisterContext, cfg SyncerConf
 		GenericTranslator: translator.NewGenericTranslator(ctx, cfg.Name, cfg.Object, mapper),
 		syncFields:        cfg.SyncFields,
 	}
+}
+
+func IdentityHostName(_ *synccontext.SyncContext, vName, _ string) types.NamespacedName {
+	return types.NamespacedName{Name: vName}
 }
 
 type genericSyncer[T client.Object] struct {

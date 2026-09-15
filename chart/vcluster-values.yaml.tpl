@@ -4,6 +4,7 @@ controlPlane:
       apiServer:
         extraArgs:
           - --enable-aggregator-routing=true
+          - --secure-port=6444
   statefulSet:
     image:
       registry: ghcr.io
@@ -36,11 +37,18 @@ plugins:
       resources:
         - apiVersion: route.openshift.io/v1
           kind: Route
+        - apiVersion: oauth.openshift.io/v1
+          kind: OAuthClient
     rbac:
       role:
         extraRules:
           - apiGroups: ["route.openshift.io"]
             resources: ["routes", "routes/status"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+      clusterRole:
+        extraRules:
+          - apiGroups: ["oauth.openshift.io"]
+            resources: ["oauthclients"]
             verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 experimental:
   deploy:

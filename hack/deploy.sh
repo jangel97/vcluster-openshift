@@ -27,8 +27,10 @@ ETCD_IMAGE=$(yq '.etcd.image' "$CONFIG")
 ETCD_CLIENT_PORT=$(yq '.etcd.clientPort' "$CONFIG")
 ETCD_PEER_PORT=$(yq '.etcd.peerPort' "$CONFIG")
 OAS_PORT=$(yq '.openshiftApiserver.port' "$CONFIG")
+NGINX_IMAGE=$(yq '.nginx.image' "$CONFIG")
 echo "  etcd: $ETCD_IMAGE (ports: $ETCD_CLIENT_PORT/$ETCD_PEER_PORT)"
 echo "  openshift-apiserver port: $OAS_PORT"
+echo "  nginx proxy: $NGINX_IMAGE"
 
 echo "=== Creating namespace ==="
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
@@ -151,7 +153,8 @@ echo "=== Creating/upgrading vCluster ==="
   --values "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml" \
   --connect=false \
   --upgrade
-kubectl rollout status "statefulset/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=120s
+# Don't wait for rollout here — the pod might be unhealthy until the
+# sidecar patch is applied (kube-apiserver port shift requires the nginx proxy).
 
 echo "=== Creating host resources (ConfigMap + Secret) ==="
 TEMPLATE_SED="s|OPENSHIFT_APISERVER_IMAGE|$OPENSHIFT_APISERVER_IMAGE|g"
@@ -159,6 +162,7 @@ TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_IMAGE|$ETCD_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_CLIENT_PORT|$ETCD_CLIENT_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_PEER_PORT|$ETCD_PEER_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OPENSHIFT_APISERVER_PORT|$OAS_PORT|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|NGINX_IMAGE|$NGINX_IMAGE|g"
 if [ -n "$RUN_AS_USER" ]; then
   TEMPLATE_SED="$TEMPLATE_SED; s|RUN_AS_USER|$RUN_AS_USER|g"
 fi
@@ -169,6 +173,22 @@ kubectl create configmap openshift-apiserver-config \
   -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create secret tls openshift-apiserver-serving-cert \
   --cert="$ROOT_DIR/tls.crt" --key="$ROOT_DIR/tls.key" \
+  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+echo "=== Setting up OAuth metadata proxy ==="
+OAUTH_METADATA=$(kubectl get --raw /.well-known/oauth-authorization-server --context "$HOST_CONTEXT" 2>/dev/null || true)
+if [ -n "$OAUTH_METADATA" ]; then
+  echo "$OAUTH_METADATA" > "/tmp/oauth-metadata-${VCLUSTER_NAME}.json"
+  echo "  OAuth metadata fetched from host"
+else
+  echo '{}' > "/tmp/oauth-metadata-${VCLUSTER_NAME}.json"
+  echo "  WARNING: Could not fetch OAuth metadata from host — OAuth discovery will not work"
+fi
+kubectl create configmap oauth-metadata \
+  --from-file=metadata.json="/tmp/oauth-metadata-${VCLUSTER_NAME}.json" \
+  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+kubectl create configmap oauth-metadata-proxy-config \
+  --from-file=nginx.conf="$ROOT_DIR/config/nginx.conf.tpl" \
   -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
 echo "=== Patching StatefulSet with sidecars ==="
