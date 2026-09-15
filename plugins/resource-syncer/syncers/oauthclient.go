@@ -1,32 +1,43 @@
 package syncers
 
 import (
-	oauthv1 "github.com/openshift/api/oauth/v1"
 	"resource-syncer/pkg"
 
-	"github.com/loft-sh/vcluster/pkg/scheme"
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	syncertypes "github.com/loft-sh/vcluster/pkg/syncer/types"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-func init() {
-	_ = oauthv1.Install(scheme.Scheme)
+var oauthClientFields = []string{
+	"secret",
+	"additionalSecrets",
+	"redirectURIs",
+	"grantMethod",
+	"scopeRestrictions",
+	"respondWithChallenges",
+	"accessTokenMaxAgeSeconds",
+	"accessTokenInactivityTimeoutSeconds",
 }
 
 func NewOAuthClientSyncer(ctx *synccontext.RegisterContext) syncertypes.Base {
-	return pkg.NewSyncer(ctx, pkg.SyncerConfig[*oauthv1.OAuthClient]{
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "oauth.openshift.io",
+		Version: "v1",
+		Kind:    "OAuthClient",
+	})
+
+	return pkg.NewSyncer(ctx, pkg.SyncerConfig[*unstructured.Unstructured]{
 		Name:         "oauthclient",
-		Object:       &oauthv1.OAuthClient{},
+		Object:       obj,
 		HostNameFunc: pkg.IdentityHostName,
-		SyncFields: func(_ *synccontext.SyncContext, host, virtual *oauthv1.OAuthClient) {
-			host.Secret = virtual.Secret
-			host.AdditionalSecrets = virtual.AdditionalSecrets
-			host.RedirectURIs = virtual.RedirectURIs
-			host.GrantMethod = virtual.GrantMethod
-			host.ScopeRestrictions = virtual.ScopeRestrictions
-			host.RespondWithChallenges = virtual.RespondWithChallenges
-			host.AccessTokenMaxAgeSeconds = virtual.AccessTokenMaxAgeSeconds
-			host.AccessTokenInactivityTimeoutSeconds = virtual.AccessTokenInactivityTimeoutSeconds
+		SyncFields: func(_ *synccontext.SyncContext, host, virtual *unstructured.Unstructured) {
+			for _, field := range oauthClientFields {
+				if val, ok := virtual.Object[field]; ok {
+					host.Object[field] = val
+				}
+			}
 		},
 	})
 }
