@@ -5,6 +5,7 @@ controlPlane:
         extraArgs:
           - --enable-aggregator-routing=true
           - --secure-port=6444
+          - --authentication-token-webhook-config-file=/etc/webhook/webhook-token-auth.yaml
   statefulSet:
     image:
       registry: ghcr.io

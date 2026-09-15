@@ -2,6 +2,11 @@ spec:
   template:
     spec:
       containers:
+      - name: syncer
+        volumeMounts:
+        - mountPath: /etc/webhook
+          name: webhook-token-auth
+          readOnly: true
       - name: openshift-etcd
         image: ETCD_IMAGE
         command:
@@ -94,3 +99,6 @@ spec:
       - name: oauth-metadata
         configMap:
           name: oauth-metadata
+      - name: webhook-token-auth
+        configMap:
+          name: webhook-token-auth

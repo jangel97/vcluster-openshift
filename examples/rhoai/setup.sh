@@ -77,6 +77,21 @@ for i in $(seq 1 60); do
 done
 
 echo ""
+echo "=== Step 5: Copy host ingress CA for OAuth trust ==="
+INGRESS_CA=$(kubectl get configmap host-ingress-ca -n openshift-config-managed \
+  -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
+if [ -n "$INGRESS_CA" ]; then
+  kubectl create configmap odh-trusted-ca-bundle \
+    --from-literal="odh-trusted-ca-bundle.crt=$INGRESS_CA" \
+    --from-literal="odh-ca-bundle.crt=$INGRESS_CA" \
+    -n opendatahub --dry-run=client -o yaml | kubectl apply -f -
+  echo "  Ingress CA injected into opendatahub/odh-trusted-ca-bundle"
+else
+  echo "  WARNING: host-ingress-ca not found in openshift-config-managed."
+  echo "  OAuth login will fail — run 'make deploy' first to populate the CA."
+fi
+
+echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Next steps:"

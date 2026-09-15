@@ -38,4 +38,4 @@ imagePolicyConfig:
   maxImagesBulkImportedPerRepository: 50
   internalRegistryHostname: "image-registry.openshift-image-registry.svc:5000"
 routingConfig:
-  subdomain: "apps.example.com"
+  subdomain: "ROUTING_SUBDOMAIN"

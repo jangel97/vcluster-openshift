@@ -38,6 +38,20 @@ kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -
 echo "=== Granting privileged SCC to vCluster SA ==="
 oc adm policy add-scc-to-user privileged "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
+echo "=== Granting route hostname permission to vCluster SA ==="
+kubectl apply --context "$HOST_CONTEXT" -f - <<ROUTEROLE
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vcluster-route-custom-host
+rules:
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes/custom-host"]
+    verbs: ["create", "update"]
+ROUTEROLE
+oc adm policy add-cluster-role-to-user vcluster-route-custom-host \
+  "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
+
 echo "=== Detecting namespace UID range ==="
 RUN_AS_USER=""
 for i in $(seq 1 15); do
@@ -172,6 +186,15 @@ echo "=== Creating/upgrading vCluster ==="
 # Don't wait for rollout here — the pod might be unhealthy until the
 # sidecar patch is applied (kube-apiserver port shift requires the nginx proxy).
 
+echo "=== Detecting routing subdomain ==="
+ROUTING_SUBDOMAIN=$(kubectl get ingress.config.openshift.io cluster --context "$HOST_CONTEXT" -o jsonpath='{.spec.domain}' 2>/dev/null || true)
+if [ -z "$ROUTING_SUBDOMAIN" ]; then
+  ROUTING_SUBDOMAIN="apps.example.com"
+  echo "  WARNING: Could not detect ingress domain, using $ROUTING_SUBDOMAIN"
+else
+  echo "  Routing subdomain: $ROUTING_SUBDOMAIN"
+fi
+
 echo "=== Creating host resources (ConfigMap + Secret) ==="
 TEMPLATE_SED="s|OPENSHIFT_APISERVER_IMAGE|$OPENSHIFT_APISERVER_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_IMAGE|$ETCD_IMAGE|g"
@@ -179,6 +202,7 @@ TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_CLIENT_PORT|$ETCD_CLIENT_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_PEER_PORT|$ETCD_PEER_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OPENSHIFT_APISERVER_PORT|$OAS_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|NGINX_IMAGE|$NGINX_IMAGE|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|ROUTING_SUBDOMAIN|$ROUTING_SUBDOMAIN|g"
 if [ -n "$RUN_AS_USER" ]; then
   TEMPLATE_SED="$TEMPLATE_SED; s|RUN_AS_USER|$RUN_AS_USER|g"
 fi
@@ -190,6 +214,15 @@ kubectl create configmap openshift-apiserver-config \
 kubectl create secret tls openshift-apiserver-serving-cert \
   --cert="$ROOT_DIR/tls.crt" --key="$ROOT_DIR/tls.key" \
   -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+echo "=== Setting up webhook token authentication ==="
+kubectl create configmap webhook-token-auth \
+  --from-file=webhook-token-auth.yaml="$ROOT_DIR/config/webhook-token-auth.yaml" \
+  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+echo "=== Granting auth-delegator to vCluster SA ==="
+oc adm policy add-cluster-role-to-user system:auth-delegator \
+  "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Setting up OAuth metadata proxy ==="
 OAUTH_METADATA=$(kubectl get --raw /.well-known/oauth-authorization-server --context "$HOST_CONTEXT" 2>/dev/null || true)
@@ -292,6 +325,19 @@ if [ "$RESOURCE_COUNT" -gt 0 ]; then
   done
 else
   echo "  No host resources configured, skipping."
+fi
+
+echo "=== Copying host ingress CA into vCluster ==="
+kubectl create namespace openshift-config-managed --dry-run=client -o yaml | kubectl apply -f -
+INGRESS_CA=$(kubectl get secret router-certs-default -n openshift-ingress \
+  --context "$HOST_CONTEXT" -o jsonpath='{.data.tls\.crt}' 2>/dev/null | base64 -d)
+if [ -n "$INGRESS_CA" ]; then
+  kubectl create configmap host-ingress-ca \
+    --from-literal="ca-bundle.crt=$INGRESS_CA" \
+    -n openshift-config-managed --dry-run=client -o yaml | kubectl apply -f -
+  echo "  Ingress CA stored in openshift-config-managed/host-ingress-ca"
+else
+  echo "  WARNING: Could not fetch ingress CA from host"
 fi
 
 echo "=== Registering APIServices ==="
