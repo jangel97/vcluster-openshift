@@ -17,7 +17,20 @@ teardown: ## Tear down vCluster and clean up
 	-$(VCLUSTER_BIN) disconnect 2>/dev/null
 	-pkill -f "vcluster connect $(VCLUSTER_NAME)" 2>/dev/null
 	-$(VCLUSTER_BIN) delete $(VCLUSTER_NAME) --namespace $(NAMESPACE)
-	-kubectl delete namespace $(NAMESPACE)
+	@echo "Cleaning up cluster-scoped resources..."
+	-oc adm policy remove-scc-from-user privileged "system:serviceaccount:$(NAMESPACE):vc-$(VCLUSTER_NAME)" 2>/dev/null
+	-oc adm policy remove-cluster-role-from-user vcluster-route-custom-host "system:serviceaccount:$(NAMESPACE):vc-$(VCLUSTER_NAME)" 2>/dev/null
+	-oc adm policy remove-cluster-role-from-user system:auth-delegator "system:serviceaccount:$(NAMESPACE):vc-$(VCLUSTER_NAME)" 2>/dev/null
+	-kubectl delete namespace $(NAMESPACE) --wait=false
+	@echo "Waiting for namespace deletion (force-finalizing if stuck)..."
+	@for i in $$(seq 1 15); do \
+		kubectl get namespace $(NAMESPACE) >/dev/null 2>&1 || { echo "Namespace deleted."; exit 0; }; \
+		sleep 2; \
+	done; \
+	echo "Namespace stuck — removing finalizers..."; \
+	kubectl get namespace $(NAMESPACE) -o json | jq '.spec.finalizers = []' | \
+		kubectl replace --raw "/api/v1/namespaces/$(NAMESPACE)/finalize" -f - >/dev/null 2>&1; \
+	echo "Namespace finalized."
 
 verify: ## Verify OpenShift APIs are working
 	@echo "=== Checking APIServices ==="

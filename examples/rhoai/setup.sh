@@ -1,7 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-HOST_CONTEXT="${HOST_CONTEXT:-$(kubectl config current-context)}"
+if [ -z "${HOST_CONTEXT:-}" ]; then
+  echo "ERROR: HOST_CONTEXT is required (vCluster is the current context after deploy)."
+  echo "  HOST_CONTEXT=<your-host-context> bash examples/rhoai/setup.sh"
+  exit 1
+fi
 NAMESPACE="${NAMESPACE:-vcluster-ocp}"
 
 echo "=== Step 1: Copy service CA signing key and CA bundle from host ==="
@@ -77,24 +81,76 @@ for i in $(seq 1 60); do
 done
 
 echo ""
-echo "=== Step 5: Copy host ingress CA for OAuth trust ==="
+echo "=== Step 5: Create DSCI and DSC ==="
 INGRESS_CA=$(kubectl get configmap host-ingress-ca -n openshift-config-managed \
   -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
+CUSTOM_CA_BUNDLE=""
 if [ -n "$INGRESS_CA" ]; then
-  kubectl create configmap odh-trusted-ca-bundle \
-    --from-literal="odh-trusted-ca-bundle.crt=$INGRESS_CA" \
-    --from-literal="odh-ca-bundle.crt=$INGRESS_CA" \
-    -n opendatahub --dry-run=client -o yaml | kubectl apply -f -
-  echo "  Ingress CA injected into opendatahub/odh-trusted-ca-bundle"
+  CUSTOM_CA_BUNDLE="$INGRESS_CA"
+  echo "  Ingress CA found — will inject into DSCI customCABundle"
 else
   echo "  WARNING: host-ingress-ca not found in openshift-config-managed."
-  echo "  OAuth login will fail — run 'make deploy' first to populate the CA."
+  echo "  OAuth login may fail — run 'make deploy' first to populate the CA."
 fi
+
+kubectl apply -f - <<DSCI
+apiVersion: dscinitialization.opendatahub.io/v1
+kind: DSCInitialization
+metadata:
+  name: default-dsci
+spec:
+  applicationsNamespace: opendatahub
+  monitoring:
+    managementState: Removed
+  serviceMesh:
+    managementState: Removed
+  trustedCABundle:
+    managementState: Managed
+    customCABundle: |
+$(echo "$CUSTOM_CA_BUNDLE" | sed 's/^/      /')
+DSCI
+
+kubectl apply -f - <<DSC
+apiVersion: datasciencecluster.opendatahub.io/v1
+kind: DataScienceCluster
+metadata:
+  name: default-dsc
+spec:
+  components:
+    dashboard:
+      managementState: Managed
+    datasciencepipelines:
+      managementState: Removed
+    kserve:
+      managementState: Removed
+    modelmeshserving:
+      managementState: Removed
+    ray:
+      managementState: Removed
+    workbenches:
+      managementState: Removed
+    codeflare:
+      managementState: Removed
+    kueue:
+      managementState: Removed
+    trainingoperator:
+      managementState: Removed
+DSC
+
+echo "Waiting for ODH dashboard..."
+for i in $(seq 1 30); do
+  if kubectl get deployment odh-dashboard -n opendatahub 2>/dev/null | grep -q odh-dashboard; then
+    kubectl rollout status deployment/odh-dashboard -n opendatahub --timeout=120s
+    echo "ODH dashboard is running."
+    break
+  fi
+  echo "  Waiting for dashboard deployment (attempt $i/30)..."
+  sleep 5
+done
 
 echo ""
 echo "=== Setup complete ==="
 echo ""
-echo "Next steps:"
-echo "  1. Create a DSCInitialization and DataScienceCluster"
-echo "  2. Create a workbench namespace and notebook"
+echo "  Dashboard route:"
+echo "    kubectl get route odh-dashboard -n opendatahub -o jsonpath='{.spec.host}'"
 echo ""

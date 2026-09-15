@@ -64,6 +64,23 @@ spec:
           name: openshift-apiserver-config
         - mountPath: /var/serving-cert
           name: openshift-apiserver-serving-cert
+      - name: user-api-proxy
+        image: NGINX_IMAGE
+        ports:
+        - containerPort: 8446
+          name: user-api
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: RUN_AS_USER
+        volumeMounts:
+        - mountPath: /data
+          name: data
+          readOnly: true
+        - mountPath: /etc/nginx/nginx.conf
+          name: user-api-proxy-config
+          subPath: nginx.conf
+          readOnly: true
       - name: oauth-metadata-proxy
         image: NGINX_IMAGE
         ports:
@@ -102,3 +119,6 @@ spec:
       - name: webhook-token-auth
         configMap:
           name: webhook-token-auth
+      - name: user-api-proxy-config
+        configMap:
+          name: user-api-proxy-config

@@ -220,6 +220,11 @@ kubectl create configmap webhook-token-auth \
   --from-file=webhook-token-auth.yaml="$ROOT_DIR/config/webhook-token-auth.yaml" \
   -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
+echo "=== Setting up user API proxy ==="
+kubectl create configmap user-api-proxy-config \
+  --from-file=nginx.conf="$ROOT_DIR/config/user-api-proxy.nginx.conf" \
+  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
 echo "=== Granting auth-delegator to vCluster SA ==="
 oc adm policy add-cluster-role-to-user system:auth-delegator \
   "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
@@ -259,28 +264,31 @@ done
 echo "=== Connecting to vCluster ==="
 "$VCLUSTER_BIN" connect "$VCLUSTER_NAME" --namespace "$NAMESPACE" &
 CONNECT_PID=$!
-echo "Waiting for vCluster port-forward (pid $CONNECT_PID)..."
-sleep 5
+echo "Waiting for vCluster connection (pid $CONNECT_PID)..."
+for i in $(seq 1 30); do
+  if kubectl get ns default &>/dev/null; then
+    echo "  vCluster connection ready."
+    break
+  fi
+  echo "  Waiting for vCluster API (attempt $i/30)..."
+  sleep 3
+done
 
 echo "=== Applying in-cluster manifests ==="
-kubectl create namespace openshift-apiserver --dry-run=client -o yaml | kubectl apply -f -
-for i in $(seq 1 10); do
-  kubectl get namespace openshift-apiserver &>/dev/null && break
-  echo "  Waiting for namespace..."
-  sleep 2
-done
-kubectl apply -f "$ROOT_DIR/manifests/service.yaml"
-
-echo "=== Setting up Endpoints ==="
 POD_IP=$(kubectl get pod "${VCLUSTER_NAME}-0" -n "$NAMESPACE" \
   --context "$HOST_CONTEXT" -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-if [ -n "$POD_IP" ]; then
-  sed "s/REPLACE_WITH_POD_IP/$POD_IP/" "$ROOT_DIR/manifests/endpoints.yaml" | kubectl apply -f -
-  echo "Endpoints set to pod IP: $POD_IP"
-else
-  echo "WARNING: Could not detect pod IP. Set it manually."
-  kubectl apply -f "$ROOT_DIR/manifests/endpoints.yaml"
-fi
+for i in $(seq 1 20); do
+  if kubectl create namespace openshift-apiserver --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null && \
+     kubectl apply -f "$ROOT_DIR/manifests/service.yaml" 2>/dev/null && \
+     kubectl apply -f "$ROOT_DIR/manifests/user-api-service.yaml" 2>/dev/null && \
+     sed "s/REPLACE_WITH_POD_IP/$POD_IP/" "$ROOT_DIR/manifests/endpoints.yaml" | kubectl apply -f - 2>/dev/null && \
+     sed "s/REPLACE_WITH_POD_IP/$POD_IP/" "$ROOT_DIR/manifests/user-api-endpoints.yaml" | kubectl apply -f - 2>/dev/null; then
+    echo "  In-cluster manifests applied (pod IP: $POD_IP)."
+    break
+  fi
+  echo "  Waiting for vCluster API to stabilize (attempt $i/20)..."
+  sleep 3
+done
 
 echo "=== Verifying CRDs ==="
 for crd in "${CRD_NAMES[@]}"; do
@@ -359,6 +367,23 @@ spec:
   insecureSkipTLSVerify: true
 APISERVICE
 done
+
+echo "=== Registering user.openshift.io APIService (proxy to host) ==="
+cat <<APISERVICE | kubectl apply -f -
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1.user.openshift.io
+spec:
+  group: user.openshift.io
+  version: v1
+  service:
+    namespace: openshift-apiserver
+    name: user-api
+  groupPriorityMinimum: 9900
+  versionPriority: 15
+  insecureSkipTLSVerify: true
+APISERVICE
 
 echo ""
 echo "=== Deploy complete ==="
