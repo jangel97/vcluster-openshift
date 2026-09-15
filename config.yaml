@@ -31,7 +31,6 @@ apiGroups:
 crds:
   - clusterresourcequotas.quota.openshift.io
   - securitycontextconstraints.security.openshift.io
-  - oauthclients.oauth.openshift.io
 
 # Fetch ALL CRDs matching these group suffixes from the host.
 crdGroups:

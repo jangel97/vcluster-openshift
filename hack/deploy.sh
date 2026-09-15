@@ -112,6 +112,22 @@ done
 
 echo "  Generated ${#CRD_NAMES[@]} CRD stubs"
 
+# Append static CRD definitions (for native OpenShift APIs that aren't CRDs on the host)
+if [ -d "$ROOT_DIR/crds" ]; then
+  for crdfile in "$ROOT_DIR"/crds/*.yaml; do
+    [ -f "$crdfile" ] || continue
+    STATIC_CRD=$(cat "$crdfile")
+    echo "  Including static CRD: $(basename "$crdfile")"
+    if [ -n "$CRD_MANIFESTS" ]; then
+      CRD_MANIFESTS="${CRD_MANIFESTS}
+---
+${STATIC_CRD}"
+    else
+      CRD_MANIFESTS="$STATIC_CRD"
+    fi
+  done
+fi
+
 echo "=== Generating vCluster values ==="
 if [ -n "$RUN_AS_USER" ]; then
   sed "s/RUN_AS_USER/$RUN_AS_USER/g" "$ROOT_DIR/chart/vcluster-values.yaml.tpl" > "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml"

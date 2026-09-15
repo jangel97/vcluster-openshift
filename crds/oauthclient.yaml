@@ -1,0 +1,49 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: oauthclients.oauth.openshift.io
+spec:
+  group: oauth.openshift.io
+  names:
+    kind: OAuthClient
+    listKind: OAuthClientList
+    plural: oauthclients
+    singular: oauthclient
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            secret:
+              type: string
+            additionalSecrets:
+              type: array
+              items:
+                type: string
+            redirectURIs:
+              type: array
+              items:
+                type: string
+            grantMethod:
+              type: string
+            respondWithChallenges:
+              type: boolean
+            scopeRestrictions:
+              type: array
+              items:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+            accessTokenMaxAgeSeconds:
+              type: integer
+            accessTokenInactivityTimeoutSeconds:
+              type: integer
