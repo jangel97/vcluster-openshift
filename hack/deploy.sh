@@ -61,6 +61,20 @@ echo "$ROUTE_ROLE" | retry kubectl apply --context "$HOST_CONTEXT" -f -
 retry oc adm policy add-cluster-role-to-user vcluster-route-custom-host \
   "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
+echo "=== Granting user API impersonation to vCluster SA ==="
+cat <<EOF | retry kubectl apply --context "$HOST_CONTEXT" -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vcluster-${VCLUSTER_NAME}-user-api-impersonation
+rules:
+- apiGroups: [""]
+  resources: ["users", "groups"]
+  verbs: ["impersonate"]
+EOF
+retry oc adm policy add-cluster-role-to-user "vcluster-${VCLUSTER_NAME}-user-api-impersonation" \
+  "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
+
 echo "=== Detecting namespace UID range ==="
 RUN_AS_USER=""
 for i in $(seq 1 15); do
@@ -232,6 +246,8 @@ metadata:
 data:
   nginx.conf: |
 $(sed 's/^/    /' "$ROOT_DIR/config/user-api-proxy.nginx.conf")
+  proxy.js: |
+$(sed 's/^/    /' "$ROOT_DIR/config/proxy.js")
 ---
 apiVersion: v1
 kind: ConfigMap

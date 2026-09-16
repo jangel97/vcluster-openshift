@@ -21,6 +21,7 @@ teardown: ## Tear down vCluster and clean up
 	-oc adm policy remove-scc-from-user privileged "system:serviceaccount:$(NAMESPACE):vc-$(VCLUSTER_NAME)" 2>/dev/null
 	-oc adm policy remove-cluster-role-from-user vcluster-route-custom-host "system:serviceaccount:$(NAMESPACE):vc-$(VCLUSTER_NAME)" 2>/dev/null
 	-oc adm policy remove-cluster-role-from-user system:auth-delegator "system:serviceaccount:$(NAMESPACE):vc-$(VCLUSTER_NAME)" 2>/dev/null
+	-kubectl delete clusterrole vcluster-$(VCLUSTER_NAME)-user-api-impersonation --ignore-not-found 2>/dev/null
 	-kubectl delete namespace $(NAMESPACE) --wait=false
 	@echo "Waiting for namespace deletion (force-finalizing if stuck)..."
 	@for i in $$(seq 1 15); do \

@@ -81,6 +81,10 @@ spec:
           name: user-api-proxy-config
           subPath: nginx.conf
           readOnly: true
+        - mountPath: /etc/nginx/proxy.js
+          name: user-api-proxy-config
+          subPath: proxy.js
+          readOnly: true
       - name: oauth-metadata-proxy
         image: NGINX_IMAGE
         ports:
