@@ -295,6 +295,13 @@ for i in $(seq 1 30); do
 done
 
 echo "=== Applying in-cluster manifests ==="
+CURRENT_CTX=$(kubectl config current-context)
+if [ "$CURRENT_CTX" = "$HOST_CONTEXT" ]; then
+  echo "ERROR: kubectl context is still the host cluster — vcluster connect may have failed."
+  echo "       Refusing to apply in-cluster manifests to the host to avoid overwriting host resources."
+  exit 1
+fi
+echo "  Using context: $CURRENT_CTX"
 POD_IP=$(kubectl get pod "${VCLUSTER_NAME}-0" -n "$NAMESPACE" \
   --context "$HOST_CONTEXT" -o jsonpath='{.status.podIP}' 2>/dev/null || true)
 for i in $(seq 1 20); do
