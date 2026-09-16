@@ -52,19 +52,31 @@ type genericSyncer[T client.Object] struct {
 	syncFields func(ctx *synccontext.SyncContext, host, virtual T)
 }
 
+func tryMigrate(fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return fn()
+}
+
 func (s *genericSyncer[T]) Migrate(ctx *synccontext.RegisterContext, mapper synccontext.Mapper) error {
 	gvk := s.GroupVersionKind()
-	restMapper := ctx.VirtualManager.GetRESTMapper()
-	for {
-		_, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		err := tryMigrate(func() error {
+			return s.GenericTranslator.Migrate(ctx, mapper)
+		})
 		if err == nil {
-			klog.Infof("API %s available, running migration", gvk)
-			break
+			klog.Infof("migration for %s completed", gvk)
+			return nil
 		}
-		klog.Infof("waiting for API %s: %v", gvk, err)
-		time.Sleep(5 * time.Second)
+		klog.Infof("waiting for %s to be ready: %v", gvk, err)
+		time.Sleep(10 * time.Second)
 	}
-	return s.GenericTranslator.Migrate(ctx, mapper)
+	klog.Warningf("migration for %s timed out after 5m — will sync from scratch", gvk)
+	return nil
 }
 
 func (s *genericSyncer[T]) Options() *syncertypes.Options {

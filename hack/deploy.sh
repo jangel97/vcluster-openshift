@@ -282,7 +282,7 @@ for i in $(seq 1 30); do
 done
 
 echo "=== Connecting to vCluster ==="
-"$VCLUSTER_BIN" connect "$VCLUSTER_NAME" --namespace "$NAMESPACE" &
+"$VCLUSTER_BIN" connect "$VCLUSTER_NAME" --namespace "$NAMESPACE" --background-proxy=false </dev/null >/dev/null 2>&1 &
 CONNECT_PID=$!
 echo "Waiting for vCluster connection (pid $CONNECT_PID)..."
 for i in $(seq 1 30); do

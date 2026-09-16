@@ -3,6 +3,7 @@ package main
 import (
 	"resource-syncer/pkg"
 	"resource-syncer/syncers"
+	"time"
 
 	"github.com/loft-sh/vcluster/pkg/syncer/synccontext"
 	syncertypes "github.com/loft-sh/vcluster/pkg/syncer/types"
@@ -41,8 +42,13 @@ func main() {
 		}
 	}
 
-	klog.Infof("calling plugin.Start()...")
-	if err := plugin.Start(); err != nil {
-		klog.Fatalf("plugin.Start() failed: %v", err)
+	for {
+		klog.Infof("starting plugin...")
+		if err := plugin.Start(); err != nil {
+			klog.Errorf("plugin.Start() failed: %v — retrying in 10s", err)
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		return
 	}
 }
