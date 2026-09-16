@@ -267,6 +267,26 @@ sed "$TEMPLATE_SED" "$ROOT_DIR/config/patch.yaml.tpl" > "$PATCH_FILE"
 retry kubectl patch statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" --type strategic --patch-file "$PATCH_FILE"
 retry kubectl rollout status "statefulset/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=180s
 
+echo "=== Creating host Service for OpenShift API sidecars ==="
+cat <<EOF | retry kubectl apply --context "$HOST_CONTEXT" -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${VCLUSTER_NAME}-openshift-apis
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: vcluster
+    release: ${VCLUSTER_NAME}
+  ports:
+  - name: openshift-apiserver
+    port: 8444
+    targetPort: 8444
+  - name: user-api
+    port: 8446
+    targetPort: 8446
+EOF
+
 echo "=== Waiting for openshift-apiserver health ==="
 for i in $(seq 1 30); do
   if kubectl exec "${VCLUSTER_NAME}-0" -n "$NAMESPACE" -c openshift-apiserver -- \
@@ -300,15 +320,16 @@ if [ "$CURRENT_CTX" = "$HOST_CONTEXT" ]; then
   exit 1
 fi
 echo "  Using context: $CURRENT_CTX"
-POD_IP=$(kubectl get pod "${VCLUSTER_NAME}-0" -n "$NAMESPACE" \
-  --context "$HOST_CONTEXT" -o jsonpath='{.status.podIP}' 2>/dev/null || true)
+CLUSTER_IP=$(kubectl get svc "${VCLUSTER_NAME}-openshift-apis" -n "$NAMESPACE" \
+  --context "$HOST_CONTEXT" -o jsonpath='{.spec.clusterIP}')
+echo "  Using stable ClusterIP: $CLUSTER_IP"
 for i in $(seq 1 20); do
   if kubectl create namespace openshift-apiserver --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null && \
      kubectl apply -f "$ROOT_DIR/manifests/service.yaml" 2>/dev/null && \
      kubectl apply -f "$ROOT_DIR/manifests/user-api-service.yaml" 2>/dev/null && \
-     sed "s/REPLACE_WITH_POD_IP/$POD_IP/" "$ROOT_DIR/manifests/endpoints.yaml" | kubectl apply -f - 2>/dev/null && \
-     sed "s/REPLACE_WITH_POD_IP/$POD_IP/" "$ROOT_DIR/manifests/user-api-endpoints.yaml" | kubectl apply -f - 2>/dev/null; then
-    echo "  In-cluster manifests applied (pod IP: $POD_IP)."
+     sed "s/REPLACE_WITH_POD_IP/$CLUSTER_IP/" "$ROOT_DIR/manifests/endpoints.yaml" | kubectl apply -f - 2>/dev/null && \
+     sed "s/REPLACE_WITH_POD_IP/$CLUSTER_IP/" "$ROOT_DIR/manifests/user-api-endpoints.yaml" | kubectl apply -f - 2>/dev/null; then
+    echo "  In-cluster manifests applied (ClusterIP: $CLUSTER_IP)."
     break
   fi
   echo "  Waiting for vCluster API to stabilize (attempt $i/20)..."
