@@ -282,15 +282,16 @@ for i in $(seq 1 30); do
 done
 
 echo "=== Connecting to vCluster ==="
-"$VCLUSTER_BIN" connect "$VCLUSTER_NAME" --namespace "$NAMESPACE" --background-proxy=false </dev/null >/dev/null 2>&1 &
+"$VCLUSTER_BIN" connect "$VCLUSTER_NAME" --namespace "$NAMESPACE" </dev/null &
 CONNECT_PID=$!
 echo "Waiting for vCluster connection (pid $CONNECT_PID)..."
 for i in $(seq 1 30); do
-  if kubectl get ns default &>/dev/null; then
-    echo "  vCluster connection ready."
+  CURRENT_CTX=$(kubectl config current-context 2>/dev/null || true)
+  if [ "$CURRENT_CTX" != "$HOST_CONTEXT" ] && kubectl get ns default &>/dev/null; then
+    echo "  vCluster connection ready (context: $CURRENT_CTX)."
     break
   fi
-  echo "  Waiting for vCluster API (attempt $i/30)..."
+  echo "  Waiting for vCluster context switch (attempt $i/30)..."
   sleep 3
 done
 
