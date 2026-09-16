@@ -109,10 +109,7 @@ CRD_MANIFESTS=$(echo "$ALL_CRDS_JSON" | jq '[.items[] | {
       schema: {
         openAPIV3Schema: {
           type: "object",
-          properties: {
-            spec: { type: "object", "x-kubernetes-preserve-unknown-fields": true },
-            status: { type: "object", "x-kubernetes-preserve-unknown-fields": true }
-          }
+          "x-kubernetes-preserve-unknown-fields": true
         }
       }
     }]
