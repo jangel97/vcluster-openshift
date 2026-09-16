@@ -1,6 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+retry() {
+  local n=3 delay=5
+  for i in $(seq 1 "$n"); do
+    if "$@"; then return 0; fi
+    [ "$i" -lt "$n" ] && echo "  Retry $i/$n, waiting ${delay}s..." && sleep "$delay"
+  done
+  echo "ERROR: failed after $n attempts: $*" >&2
+  return 1
+}
+
 NAMESPACE="$1"
 VCLUSTER_NAME="$2"
 VCLUSTER_BIN="$3"
@@ -33,23 +43,22 @@ echo "  openshift-apiserver port: $OAS_PORT"
 echo "  nginx proxy: $NGINX_IMAGE"
 
 echo "=== Creating namespace ==="
-kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | retry kubectl apply -f -
 
 echo "=== Granting privileged SCC to vCluster SA ==="
-oc adm policy add-scc-to-user privileged "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
+retry oc adm policy add-scc-to-user privileged "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Granting route hostname permission to vCluster SA ==="
-kubectl apply --context "$HOST_CONTEXT" -f - <<ROUTEROLE
-apiVersion: rbac.authorization.k8s.io/v1
+ROUTE_ROLE='apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: vcluster-route-custom-host
 rules:
   - apiGroups: ["route.openshift.io"]
     resources: ["routes/custom-host"]
-    verbs: ["create", "update"]
-ROUTEROLE
-oc adm policy add-cluster-role-to-user vcluster-route-custom-host \
+    verbs: ["create", "update"]'
+echo "$ROUTE_ROLE" | retry kubectl apply --context "$HOST_CONTEXT" -f -
+retry oc adm policy add-cluster-role-to-user vcluster-route-custom-host \
   "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Detecting namespace UID range ==="
@@ -69,64 +78,49 @@ if [ -z "$RUN_AS_USER" ]; then
 fi
 
 echo "=== Fetching CRD stubs from host cluster ==="
-# Collect all CRD names to fetch (individual + group-matched)
 CRD_NAMES=()
 for crd in $(yq '.crds[]' "$CONFIG" 2>/dev/null); do
   CRD_NAMES+=("$crd")
 done
+
+ALL_HOST_CRDS=$(retry kubectl get crd --context "$HOST_CONTEXT" -o name 2>/dev/null || true)
 for group in $(yq '.crdGroups[]' "$CONFIG" 2>/dev/null); do
-  for crd in $(kubectl get crd --context "$HOST_CONTEXT" -o name 2>/dev/null | grep "\.${group}$" | sed 's|customresourcedefinition.apiextensions.k8s.io/||'); do
+  for crd in $(echo "$ALL_HOST_CRDS" | grep "\.${group}$" | sed 's|customresourcedefinition.apiextensions.k8s.io/||'); do
     CRD_NAMES+=("$crd")
   done
 done
 
-# Generate minimal stub for each CRD and collect into a single manifests block.
-# Minimal stubs use x-kubernetes-preserve-unknown-fields so the vCluster accepts
-# any resource content without needing the full OpenAPI schema (which is often 40KB+
-# and triggers a race condition in the embedded kube-apiserver's CRD registration).
-CRD_MANIFESTS=""
-for crd in "${CRD_NAMES[@]}"; do
-  echo "  Generating stub for $crd"
-  STUB=$(kubectl get crd "$crd" --context "$HOST_CONTEXT" -o json | jq -r '
-    {
-      apiVersion: "apiextensions.k8s.io/v1",
-      kind: "CustomResourceDefinition",
-      metadata: { name: .metadata.name },
-      spec: {
-        group: .spec.group,
-        names: .spec.names,
-        scope: .spec.scope,
-        versions: [.spec.versions[] | {
-          name: .name,
-          served: .served,
-          storage: .storage,
-          subresources: (.subresources // null),
-          schema: {
-            openAPIV3Schema: {
-              type: "object",
-              properties: {
-                spec: { type: "object", "x-kubernetes-preserve-unknown-fields": true },
-                status: { type: "object", "x-kubernetes-preserve-unknown-fields": true }
-              }
-            }
-          }
-        }]
-      }
-    }
-  ' | yq -P)
+echo "  Fetching ${#CRD_NAMES[@]} CRDs in a single batch..."
+ALL_CRDS_JSON=$(retry kubectl get crd "${CRD_NAMES[@]}" --context "$HOST_CONTEXT" -o json)
 
-  if [ -n "$CRD_MANIFESTS" ]; then
-    CRD_MANIFESTS="${CRD_MANIFESTS}
----
-${STUB}"
-  else
-    CRD_MANIFESTS="$STUB"
-  fi
-done
+CRD_MANIFESTS=$(echo "$ALL_CRDS_JSON" | jq '[.items[] | {
+  apiVersion: "apiextensions.k8s.io/v1",
+  kind: "CustomResourceDefinition",
+  metadata: { name: .metadata.name },
+  spec: {
+    group: .spec.group,
+    names: .spec.names,
+    scope: .spec.scope,
+    versions: [.spec.versions[] | {
+      name: .name,
+      served: .served,
+      storage: .storage,
+      subresources: (.subresources // null),
+      schema: {
+        openAPIV3Schema: {
+          type: "object",
+          properties: {
+            spec: { type: "object", "x-kubernetes-preserve-unknown-fields": true },
+            status: { type: "object", "x-kubernetes-preserve-unknown-fields": true }
+          }
+        }
+      }
+    }]
+  }
+}]' | yq -P '.[] | splitDoc')
 
 echo "  Generated ${#CRD_NAMES[@]} CRD stubs"
 
-# Append static CRD definitions (for native OpenShift APIs that aren't CRDs on the host)
 if [ -d "$ROOT_DIR/crds" ]; then
   for crdfile in "$ROOT_DIR"/crds/*.yaml; do
     [ -f "$crdfile" ] || continue
@@ -148,10 +142,6 @@ if [ -n "$RUN_AS_USER" ]; then
 else
   sed '/RUN_AS_USER/d; /runAsUser/d; /fsGroup/d' "$ROOT_DIR/chart/vcluster-values.yaml.tpl" > "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml"
 fi
-
-# Inject CRD manifests into the values file, indented to match the YAML block scalar
-INDENTED_MANIFESTS=$(echo "$CRD_MANIFESTS" | sed 's/^/        /')
-ESCAPED_MANIFESTS=$(echo "$INDENTED_MANIFESTS" | sed 's/[&/\]/\\&/g')
 
 # Strip plugin block if no resource-syncer image provided
 if [ -z "$RESOURCE_SYNCER_IMAGE" ]; then
@@ -183,11 +173,9 @@ echo "=== Creating/upgrading vCluster ==="
   --values "/tmp/vcluster-values-${VCLUSTER_NAME}.yaml" \
   --connect=false \
   --upgrade
-# Don't wait for rollout here — the pod might be unhealthy until the
-# sidecar patch is applied (kube-apiserver port shift requires the nginx proxy).
 
 echo "=== Detecting routing subdomain ==="
-ROUTING_SUBDOMAIN=$(kubectl get ingress.config.openshift.io cluster --context "$HOST_CONTEXT" -o jsonpath='{.spec.domain}' 2>/dev/null || true)
+ROUTING_SUBDOMAIN=$(retry kubectl get ingress.config.openshift.io cluster --context "$HOST_CONTEXT" -o jsonpath='{.spec.domain}' 2>/dev/null || true)
 if [ -z "$ROUTING_SUBDOMAIN" ]; then
   ROUTING_SUBDOMAIN="apps.example.com"
   echo "  WARNING: Could not detect ingress domain, using $ROUTING_SUBDOMAIN"
@@ -195,7 +183,7 @@ else
   echo "  Routing subdomain: $ROUTING_SUBDOMAIN"
 fi
 
-echo "=== Creating host resources (ConfigMap + Secret) ==="
+echo "=== Creating host resources (ConfigMaps + Secrets) ==="
 TEMPLATE_SED="s|OPENSHIFT_APISERVER_IMAGE|$OPENSHIFT_APISERVER_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_IMAGE|$ETCD_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_CLIENT_PORT|$ETCD_CLIENT_PORT|g"
@@ -208,29 +196,8 @@ if [ -n "$RUN_AS_USER" ]; then
 fi
 
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-apiserver.yaml.tpl" > "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml"
-kubectl create configmap openshift-apiserver-config \
-  --from-file=config.yaml="/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml" \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-kubectl create secret tls openshift-apiserver-serving-cert \
-  --cert="$ROOT_DIR/tls.crt" --key="$ROOT_DIR/tls.key" \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
-echo "=== Setting up webhook token authentication ==="
-kubectl create configmap webhook-token-auth \
-  --from-file=webhook-token-auth.yaml="$ROOT_DIR/config/webhook-token-auth.yaml" \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-
-echo "=== Setting up user API proxy ==="
-kubectl create configmap user-api-proxy-config \
-  --from-file=nginx.conf="$ROOT_DIR/config/user-api-proxy.nginx.conf" \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-
-echo "=== Granting auth-delegator to vCluster SA ==="
-oc adm policy add-cluster-role-to-user system:auth-delegator \
-  "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
-
-echo "=== Setting up OAuth metadata proxy ==="
-OAUTH_METADATA=$(kubectl get --raw /.well-known/oauth-authorization-server --context "$HOST_CONTEXT" 2>/dev/null || true)
+OAUTH_METADATA=$(retry kubectl get --raw /.well-known/oauth-authorization-server --context "$HOST_CONTEXT" 2>/dev/null || true)
 if [ -n "$OAUTH_METADATA" ]; then
   echo "$OAUTH_METADATA" > "/tmp/oauth-metadata-${VCLUSTER_NAME}.json"
   echo "  OAuth metadata fetched from host"
@@ -238,17 +205,70 @@ else
   echo '{}' > "/tmp/oauth-metadata-${VCLUSTER_NAME}.json"
   echo "  WARNING: Could not fetch OAuth metadata from host — OAuth discovery will not work"
 fi
-kubectl create configmap oauth-metadata \
-  --from-file=metadata.json="/tmp/oauth-metadata-${VCLUSTER_NAME}.json" \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-kubectl create configmap oauth-metadata-proxy-config \
-  --from-file=nginx.conf="$ROOT_DIR/config/nginx.conf.tpl" \
-  -n "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+# Build all ConfigMaps into a temp file and apply in a single call
+CONFIGMAPS_FILE="/tmp/vcluster-configmaps-${VCLUSTER_NAME}.yaml"
+cat > "$CONFIGMAPS_FILE" <<RESOURCES
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshift-apiserver-config
+  namespace: ${NAMESPACE}
+data:
+  config.yaml: |
+$(sed 's/^/    /' "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-token-auth
+  namespace: ${NAMESPACE}
+data:
+  webhook-token-auth.yaml: |
+$(sed 's/^/    /' "$ROOT_DIR/config/webhook-token-auth.yaml")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: user-api-proxy-config
+  namespace: ${NAMESPACE}
+data:
+  nginx.conf: |
+$(sed 's/^/    /' "$ROOT_DIR/config/user-api-proxy.nginx.conf")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oauth-metadata
+  namespace: ${NAMESPACE}
+data:
+  metadata.json: |
+$(sed 's/^/    /' "/tmp/oauth-metadata-${VCLUSTER_NAME}.json")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oauth-metadata-proxy-config
+  namespace: ${NAMESPACE}
+data:
+  nginx.conf: |
+$(sed 's/^/    /' "$ROOT_DIR/config/nginx.conf.tpl")
+RESOURCES
+retry kubectl apply -f "$CONFIGMAPS_FILE"
+
+kubectl create secret tls openshift-apiserver-serving-cert \
+  --cert="$ROOT_DIR/tls.crt" --key="$ROOT_DIR/tls.key" \
+  -n "$NAMESPACE" --dry-run=client -o yaml | retry kubectl apply -f -
+
+echo "=== Granting auth-delegator to vCluster SA ==="
+retry oc adm policy add-cluster-role-to-user system:auth-delegator \
+  "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Patching StatefulSet with sidecars ==="
-sed "$TEMPLATE_SED" "$ROOT_DIR/config/patch.yaml.tpl" | \
-  kubectl patch statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" --type strategic --patch-file /dev/stdin
-kubectl rollout status "statefulset/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=180s
+PATCH_FILE="/tmp/vcluster-patch-${VCLUSTER_NAME}.yaml"
+sed "$TEMPLATE_SED" "$ROOT_DIR/config/patch.yaml.tpl" > "$PATCH_FILE"
+retry kubectl patch statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" --type strategic --patch-file "$PATCH_FILE"
+retry kubectl rollout status "statefulset/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=180s
 
 echo "=== Waiting for openshift-apiserver health ==="
 for i in $(seq 1 30); do
@@ -291,17 +311,23 @@ for i in $(seq 1 20); do
 done
 
 echo "=== Verifying CRDs ==="
-for crd in "${CRD_NAMES[@]}"; do
-  for attempt in $(seq 1 15); do
-    if kubectl get crd "$crd" &>/dev/null; then
+REMAINING=("${CRD_NAMES[@]}")
+for attempt in $(seq 1 15); do
+  [ ${#REMAINING[@]} -eq 0 ] && break
+  FOUND=$(kubectl get crd "${REMAINING[@]}" --no-headers 2>/dev/null | awk '{print $1}' || true)
+  NEXT=()
+  for crd in "${REMAINING[@]}"; do
+    if echo "$FOUND" | grep -qx "$crd"; then
       echo "  OK $crd"
-      break
+    else
+      NEXT+=("$crd")
     fi
-    if [ "$attempt" -eq 15 ]; then
-      echo "  MISSING $crd"
-    fi
-    sleep 2
   done
+  REMAINING=("${NEXT[@]}")
+  [ ${#REMAINING[@]} -gt 0 ] && echo "  ${#REMAINING[@]} CRDs not ready (attempt $attempt/15)..." && sleep 2
+done
+for crd in "${REMAINING[@]:-}"; do
+  [ -n "$crd" ] && echo "  MISSING $crd"
 done
 
 echo "=== Copying host resources ==="
@@ -321,14 +347,11 @@ if [ "$RESOURCE_COUNT" -gt 0 ]; then
       sleep 3
     done
     echo "  Copying $RESOURCE/$NAME ($GROUP)..."
-    kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json | \
-      jq "$JQ_CLEAN_RES" | kubectl apply -f -
-    HAS_STATUS=$(kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json 2>/dev/null | jq 'has("status")')
+    retry bash -c "kubectl get '$RESOURCE.$GROUP' '$NAME' --context '$HOST_CONTEXT' -o json | jq '$JQ_CLEAN_RES' | kubectl apply -f -"
+    HAS_STATUS=$(retry kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json 2>/dev/null | jq 'has("status")')
     if [ "$HAS_STATUS" = "true" ]; then
       echo "    Copying status subresource..."
-      kubectl get "$RESOURCE.$GROUP" "$NAME" --context "$HOST_CONTEXT" -o json | \
-        jq '{apiVersion, kind, metadata: {name: .metadata.name}, status: .status}' | \
-        kubectl replace --subresource=status -f - 2>/dev/null || echo "    (status subresource not available, skipping)"
+      retry bash -c "kubectl get '$RESOURCE.$GROUP' '$NAME' --context '$HOST_CONTEXT' -o json | jq '{apiVersion, kind, metadata: {name: .metadata.name}, status: .status}' | kubectl replace --subresource=status -f -" 2>/dev/null || echo "    (status subresource not available, skipping)"
     fi
   done
 else
@@ -337,7 +360,7 @@ fi
 
 echo "=== Copying host ingress CA into vCluster ==="
 kubectl create namespace openshift-config-managed --dry-run=client -o yaml | kubectl apply -f -
-INGRESS_CA=$(kubectl get secret router-certs-default -n openshift-ingress \
+INGRESS_CA=$(retry kubectl get secret router-certs-default -n openshift-ingress \
   --context "$HOST_CONTEXT" -o jsonpath='{.data.tls\.crt}' 2>/dev/null | base64 -d)
 if [ -n "$INGRESS_CA" ]; then
   kubectl create configmap host-ingress-ca \
@@ -349,9 +372,10 @@ else
 fi
 
 echo "=== Registering APIServices ==="
+APISERVICE_YAML=""
 for group in $(yq '.apiGroups[]' "$CONFIG"); do
-  echo "  Registering v1.${group}..."
-  cat <<APISERVICE | kubectl apply -f -
+  echo "  Including v1.${group}"
+  APISERVICE_YAML+="---
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
@@ -365,11 +389,11 @@ spec:
   groupPriorityMinimum: 9900
   versionPriority: 15
   insecureSkipTLSVerify: true
-APISERVICE
+"
 done
 
-echo "=== Registering user.openshift.io APIService (proxy to host) ==="
-cat <<APISERVICE | kubectl apply -f -
+echo "  Including v1.user.openshift.io"
+APISERVICE_YAML+="---
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
@@ -383,7 +407,11 @@ spec:
   groupPriorityMinimum: 9900
   versionPriority: 15
   insecureSkipTLSVerify: true
-APISERVICE
+"
+
+APISERVICE_FILE="/tmp/vcluster-apiservices-${VCLUSTER_NAME}.yaml"
+echo "$APISERVICE_YAML" > "$APISERVICE_FILE"
+retry kubectl apply -f "$APISERVICE_FILE"
 
 echo ""
 echo "=== Deploy complete ==="
