@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [ -z "${HOST_CONTEXT:-}" ]; then
   echo "ERROR: HOST_CONTEXT is required (vCluster is the current context after deploy)."
-  echo "  HOST_CONTEXT=<your-host-context> bash examples/rhoai/setup.sh"
+  echo "  HOST_CONTEXT=<your-host-context> bash examples/odh/setup.sh"
   exit 1
 fi
 NAMESPACE="${NAMESPACE:-vcluster-ocp}"
@@ -31,10 +31,7 @@ if [ -z "$SERVICE_CA_IMAGE" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-
-# Reuse the service-ca manifest from the ODH example
-sed "s|SERVICE_CA_OPERATOR_IMAGE|$SERVICE_CA_IMAGE|g" "$ROOT_DIR/examples/odh/service-ca.yaml" | kubectl apply -f -
+sed "s|SERVICE_CA_OPERATOR_IMAGE|$SERVICE_CA_IMAGE|g" "$SCRIPT_DIR/service-ca.yaml" | kubectl apply -f -
 
 echo "Waiting for service-ca controller..."
 kubectl rollout status deployment/service-ca -n openshift-service-ca --timeout=120s
@@ -59,46 +56,32 @@ for i in $(seq 1 30); do
 done
 
 echo ""
-echo "=== Step 4: Copy pull secret for registry.redhat.io ==="
-HOST_PULL_SECRET=$(kubectl get secret pull-secret -n openshift-config --context "$HOST_CONTEXT" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null || true)
-if [ -n "$HOST_PULL_SECRET" ]; then
-  kubectl create secret docker-registry pull-secret \
-    --from-file=.dockerconfigjson=<(echo "$HOST_PULL_SECRET" | base64 -d) \
-    -n olm --dry-run=client -o yaml | kubectl apply -f -
-  kubectl patch serviceaccount default -n olm -p '{"imagePullSecrets":[{"name":"pull-secret"}]}' 2>/dev/null || true
-  echo "  Pull secret copied to olm namespace."
-else
-  echo "  WARNING: Could not copy pull secret from host."
-  echo "  The redhat-operators catalog may fail to pull."
-fi
+echo "=== Step 4: Install ODH operator ==="
+kubectl apply -f "$SCRIPT_DIR/odh-subscription.yaml"
 
-echo ""
-echo "=== Step 5: Install RHOAI operator ==="
-kubectl apply -f "$SCRIPT_DIR/rhoai-subscription.yaml"
-
-echo "Waiting for Red Hat operators catalog..."
+echo "Waiting for Red Hat community-operators catalog..."
 for i in $(seq 1 30); do
-  if kubectl get pod -n olm -l olm.catalogSource=redhat-operators 2>/dev/null | grep -q "1/1"; then
-    echo "Red Hat operators catalog is ready."
+  if kubectl get pod -n olm -l olm.catalogSource=community-operators 2>/dev/null | grep -q "1/1"; then
+    echo "Red Hat community-operators catalog is ready."
     break
   fi
-  echo "  Waiting for redhat-operators catalog (attempt $i/30)..."
+  echo "  Waiting for community-operators catalog (attempt $i/30)..."
   sleep 10
 done
 
-echo "Waiting for RHOAI operator..."
+echo "Waiting for ODH operator..."
 for i in $(seq 1 60); do
-  if kubectl get deployment rhods-operator -n redhat-ods-operator 2>/dev/null | grep -q rhods; then
-    kubectl rollout status deployment/rhods-operator -n redhat-ods-operator --timeout=180s
-    echo "RHOAI operator is running."
+  if kubectl get deployment opendatahub-operator-controller-manager -n openshift-operators 2>/dev/null | grep -q opendatahub; then
+    kubectl rollout status deployment/opendatahub-operator-controller-manager -n openshift-operators --timeout=120s
+    echo "ODH operator is running."
     break
   fi
-  echo "  Waiting for RHOAI operator deployment (attempt $i/60)..."
+  echo "  Waiting for ODH operator deployment (attempt $i/60)..."
   sleep 5
 done
 
 echo ""
-echo "=== Step 6: Create DSCI and DSC ==="
+echo "=== Step 5: Create DSCI and DSC ==="
 INGRESS_CA=$(kubectl get configmap host-ingress-ca -n openshift-config-managed \
   -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
 CUSTOM_CA_BUNDLE=""
@@ -116,7 +99,7 @@ kind: DSCInitialization
 metadata:
   name: default-dsci
 spec:
-  applicationsNamespace: redhat-ods-applications
+  applicationsNamespace: opendatahub
   monitoring:
     managementState: Removed
   serviceMesh:
@@ -139,15 +122,13 @@ spec:
     datasciencepipelines:
       managementState: Removed
     kserve:
-      managementState: Managed
-      serving:
-        managementState: Removed
+      managementState: Removed
     modelmeshserving:
       managementState: Removed
     ray:
       managementState: Removed
     workbenches:
-      managementState: Managed
+      managementState: Removed
     codeflare:
       managementState: Removed
     kueue:
@@ -156,11 +137,11 @@ spec:
       managementState: Removed
 DSC
 
-echo "Waiting for RHOAI dashboard..."
+echo "Waiting for ODH dashboard..."
 for i in $(seq 1 30); do
-  if kubectl get deployment rhods-dashboard -n redhat-ods-applications 2>/dev/null | grep -q rhods-dashboard; then
-    kubectl rollout status deployment/rhods-dashboard -n redhat-ods-applications --timeout=120s
-    echo "RHOAI dashboard is running."
+  if kubectl get deployment odh-dashboard -n opendatahub 2>/dev/null | grep -q odh-dashboard; then
+    kubectl rollout status deployment/odh-dashboard -n opendatahub --timeout=120s
+    echo "ODH dashboard is running."
     break
   fi
   echo "  Waiting for dashboard deployment (attempt $i/30)..."
@@ -171,5 +152,5 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "  Dashboard route:"
-echo "    kubectl get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}'"
+echo "    kubectl get route odh-dashboard -n opendatahub -o jsonpath='{.spec.host}'"
 echo ""

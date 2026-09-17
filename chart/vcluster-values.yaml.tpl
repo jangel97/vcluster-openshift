@@ -11,6 +11,15 @@ controlPlane:
       registry: ghcr.io
       repository: loft-sh/vcluster-oss
       tag: 0.37.0
+    resources:
+      limits:
+        cpu: "2"
+        memory: 4Gi
+        ephemeral-storage: 10Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+        ephemeral-storage: 1Gi
     security:
       podSecurityContext:
         fsGroup: RUN_AS_USER
