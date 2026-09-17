@@ -20,6 +20,9 @@ var oauthClientFields = []string{
 	"accessTokenInactivityTimeoutSeconds",
 }
 
+// TODO: IdentityHostName causes multi-vCluster collision — two vClusters with the same
+// namespace/workbench names produce identical OAuthClient names on the host. Fix by
+// switching to a prefixed HostNameFunc (e.g. "vcluster-<name>-<oauthclient-name>").
 func NewOAuthClientSyncer(ctx *synccontext.RegisterContext) syncertypes.Base {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(schema.GroupVersionKind{
