@@ -13,12 +13,12 @@ controlPlane:
       tag: 0.37.0
     resources:
       limits:
-        cpu: "2"
-        memory: 4Gi
+        cpu: "4"
+        memory: 8Gi
         ephemeral-storage: 10Gi
       requests:
-        cpu: "1"
-        memory: 2Gi
+        cpu: "2"
+        memory: 4Gi
         ephemeral-storage: 1Gi
     security:
       podSecurityContext:
