@@ -277,11 +277,17 @@ echo "=== Granting auth-delegator to vCluster SA ==="
 retry oc adm policy add-cluster-role-to-user system:auth-delegator \
   "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
-echo "=== Patching StatefulSet with sidecars ==="
+echo "=== Patching vCluster workload with sidecars ==="
 PATCH_FILE="/tmp/vcluster-patch-${VCLUSTER_NAME}.yaml"
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/patch.yaml.tpl" > "$PATCH_FILE"
-retry kubectl patch statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" --type strategic --patch-file "$PATCH_FILE"
-retry kubectl rollout status "statefulset/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=180s
+if kubectl get statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" &>/dev/null; then
+  WORKLOAD_TYPE="statefulset"
+else
+  WORKLOAD_TYPE="deployment"
+fi
+echo "  Detected $WORKLOAD_TYPE/$VCLUSTER_NAME"
+retry kubectl patch "$WORKLOAD_TYPE" "$VCLUSTER_NAME" -n "$NAMESPACE" --type strategic --patch-file "$PATCH_FILE"
+retry kubectl rollout status "$WORKLOAD_TYPE/$VCLUSTER_NAME" -n "$NAMESPACE" --timeout=180s
 
 echo "=== Creating host Service for OpenShift API sidecars ==="
 cat <<EOF | retry kubectl apply --context "$HOST_CONTEXT" -f -
@@ -304,8 +310,12 @@ spec:
 EOF
 
 echo "=== Waiting for openshift-apiserver health ==="
+VCLUSTER_POD=""
 for i in $(seq 1 30); do
-  if kubectl exec "${VCLUSTER_NAME}-0" -n "$NAMESPACE" -c openshift-apiserver -- \
+  if [ -z "$VCLUSTER_POD" ]; then
+    VCLUSTER_POD=$(kubectl get pod -n "$NAMESPACE" -l "app=vcluster,release=${VCLUSTER_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  fi
+  if [ -n "$VCLUSTER_POD" ] && kubectl exec "$VCLUSTER_POD" -n "$NAMESPACE" -c openshift-apiserver -- \
     curl -sk "https://127.0.0.1:${OAS_PORT}/healthz" 2>/dev/null | grep -q ok; then
     echo "openshift-apiserver is healthy!"
     break

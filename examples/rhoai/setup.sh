@@ -117,6 +117,18 @@ for i in $(seq 1 60); do
 done
 
 echo ""
+echo "=== Step 6b: Create openshift-service-ca.crt ConfigMaps ==="
+SERVICE_CA_CERT=$(kubectl get secret service-ca-signing-key -n openshift-service-ca \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d)
+for ns in redhat-ods-applications redhat-ods-operator olm rhods-notebooks; do
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
+  kubectl create configmap openshift-service-ca.crt \
+    --from-literal=service-ca.crt="$SERVICE_CA_CERT" \
+    -n "$ns" --dry-run=client -o yaml | kubectl apply -f -
+done
+echo "  openshift-service-ca.crt ConfigMaps created."
+
+echo ""
 echo "=== Step 7: Create DSCI and DSC ==="
 INGRESS_CA=$(kubectl get configmap host-ingress-ca -n openshift-config-managed \
   -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)

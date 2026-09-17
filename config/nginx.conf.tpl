@@ -1,9 +1,9 @@
-worker_processes 1;
+worker_processes auto;
 error_log /dev/stderr warn;
 pid /tmp/nginx.pid;
 
 events {
-    worker_connections 1024;
+    worker_connections 4096;
 }
 
 http {
@@ -15,7 +15,12 @@ http {
 
     map $http_upgrade $connection_upgrade {
         default upgrade;
-        ''      close;
+        ''      '';
+    }
+
+    upstream kube_apiserver {
+        server 127.0.0.1:6444;
+        keepalive 64;
     }
 
     server {
@@ -34,7 +39,7 @@ http {
         }
 
         location / {
-            proxy_pass https://127.0.0.1:6444;
+            proxy_pass https://kube_apiserver;
             proxy_ssl_certificate /data/pki/front-proxy-client.crt;
             proxy_ssl_certificate_key /data/pki/front-proxy-client.key;
             proxy_ssl_verify off;

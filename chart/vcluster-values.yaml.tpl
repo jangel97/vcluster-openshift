@@ -1,4 +1,22 @@
 controlPlane:
+  backingStore:
+    etcd:
+      deploy:
+        enabled: true
+        statefulSet:
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          security:
+            podSecurityContext:
+              fsGroup: RUN_AS_USER
+            containerSecurityContext:
+              runAsUser: RUN_AS_USER
+              runAsNonRoot: true
   distro:
     k8s:
       apiServer:
