@@ -73,10 +73,29 @@ else
 fi
 
 echo ""
-echo "=== Step 5: Install RHOAI operator ==="
+echo "=== Step 5: Create OpenShift prerequisites ==="
+kubectl create namespace openshift-ingress --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f - <<'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-monitoring-view
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get"]
+EOF
+
+echo "  Installing Gateway API CRDs..."
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml 2>&1 | tail -1
+echo "  OpenShift prerequisites created."
+
+echo ""
+echo "=== Step 6: Install RHOAI operator ==="
 kubectl apply -f "$SCRIPT_DIR/rhoai-subscription.yaml"
 
-echo "Waiting for Red Hat operators catalog..."
+echo "Waiting for Red Hat operators catalog (this may take a few minutes)..."
 for i in $(seq 1 30); do
   if kubectl get pod -n olm -l olm.catalogSource=redhat-operators 2>/dev/null | grep -q "1/1"; then
     echo "Red Hat operators catalog is ready."
@@ -98,7 +117,7 @@ for i in $(seq 1 60); do
 done
 
 echo ""
-echo "=== Step 6: Create DSCI and DSC ==="
+echo "=== Step 7: Create DSCI and DSC ==="
 INGRESS_CA=$(kubectl get configmap host-ingress-ca -n openshift-config-managed \
   -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
 CUSTOM_CA_BUNDLE=""
@@ -128,7 +147,7 @@ $(echo "$CUSTOM_CA_BUNDLE" | sed 's/^/      /')
 DSCI
 
 kubectl apply -f - <<DSC
-apiVersion: datasciencecluster.opendatahub.io/v1
+apiVersion: datasciencecluster.opendatahub.io/v2
 kind: DataScienceCluster
 metadata:
   name: default-dsc
@@ -136,21 +155,16 @@ spec:
   components:
     dashboard:
       managementState: Managed
-    datasciencepipelines:
-      managementState: Removed
     kserve:
       managementState: Managed
-      serving:
-        managementState: Removed
-    modelmeshserving:
-      managementState: Removed
-    ray:
-      managementState: Removed
+      rawDeploymentServiceConfig: Headless
     workbenches:
       managementState: Managed
-    codeflare:
+    aipipelines:
       managementState: Removed
     kueue:
+      managementState: Removed
+    ray:
       managementState: Removed
     trainingoperator:
       managementState: Removed
