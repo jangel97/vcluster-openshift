@@ -194,6 +194,165 @@ for i in $(seq 1 30); do
 done
 
 echo ""
+echo "=== Step 8: Dashboard OAuth proxy ==="
+OAUTH_PROXY_IMAGE="${OAUTH_PROXY_IMAGE:-}"
+if [ -z "$OAUTH_PROXY_IMAGE" ]; then
+  OAUTH_PROXY_IMAGE=$(oc adm release info --image-for=oauth-proxy 2>/dev/null || true)
+fi
+if [ -z "$OAUTH_PROXY_IMAGE" ]; then
+  echo "  WARNING: Could not detect oauth-proxy image. Skipping OAuth setup."
+  echo "  Set OAUTH_PROXY_IMAGE and re-run, or access the dashboard via port-forward."
+else
+  INGRESS_DOMAIN=$(kubectl get ingress.config.openshift.io cluster \
+    -o jsonpath='{.spec.domain}' 2>/dev/null || true)
+  DASHBOARD_HOST="rhods-dashboard-redhat-ods-applications.${INGRESS_DOMAIN}"
+
+  OAUTH_CLIENT_SECRET=$(openssl rand -hex 16)
+  COOKIE_SECRET=$(openssl rand -base64 32 | head -c 32)
+
+  echo "  Creating OAuthClient (synced to host by resource-syncer)..."
+  kubectl apply -f - <<OAUTH
+apiVersion: oauth.openshift.io/v1
+kind: OAuthClient
+metadata:
+  name: rhods-dashboard-oauth
+secret: ${OAUTH_CLIENT_SECRET}
+redirectURIs:
+  - https://${DASHBOARD_HOST}/oauth/callback
+grantMethod: auto
+OAUTH
+
+  kubectl create secret generic rhods-dashboard-oauth-config \
+    --from-literal=client-secret="$OAUTH_CLIENT_SECRET" \
+    --from-literal=cookie-secret="$COOKIE_SECRET" \
+    -n redhat-ods-applications --dry-run=client -o yaml | kubectl apply -f -
+
+  echo "  Creating oauth-proxy Service (with service-ca TLS)..."
+  kubectl apply -f - <<'SVCEOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhods-dashboard-oauth-proxy
+  namespace: redhat-ods-applications
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: rhods-dashboard-oauth-proxy-tls
+spec:
+  selector:
+    app: rhods-dashboard-oauth-proxy
+  ports:
+  - port: 8443
+    targetPort: 8443
+    name: https
+SVCEOF
+
+  echo "  Waiting for service-ca to provision TLS cert..."
+  for i in $(seq 1 30); do
+    if kubectl get secret rhods-dashboard-oauth-proxy-tls -n redhat-ods-applications &>/dev/null; then
+      echo "  TLS cert ready."
+      break
+    fi
+    [ "$i" -eq 30 ] && echo "  WARNING: TLS cert not provisioned after 60s"
+    sleep 2
+  done
+
+  echo "  Deploying oauth-proxy..."
+  kubectl apply -f - <<PROXYEOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rhods-dashboard-oauth-proxy
+  namespace: redhat-ods-applications
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rhods-dashboard-oauth-proxy
+  template:
+    metadata:
+      labels:
+        app: rhods-dashboard-oauth-proxy
+    spec:
+      containers:
+      - name: oauth-proxy
+        image: ${OAUTH_PROXY_IMAGE}
+        args:
+        - --provider=openshift
+        - --https-address=:8443
+        - --upstream=http://rhods-dashboard.redhat-ods-applications.svc:8080
+        - --tls-cert=/etc/tls/private/tls.crt
+        - --tls-key=/etc/tls/private/tls.key
+        - --cookie-secret-file=/etc/oauth/cookie-secret
+        - --client-id=rhods-dashboard-oauth
+        - --client-secret-file=/etc/oauth/client-secret
+        - --openshift-delegate-urls={"/":{"resource":"projects","verb":"list","apiGroup":"project.openshift.io"}}
+        - --skip-provider-button=true
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - name: tls
+          mountPath: /etc/tls/private
+          readOnly: true
+        - name: oauth-config
+          mountPath: /etc/oauth
+          readOnly: true
+      volumes:
+      - name: tls
+        secret:
+          secretName: rhods-dashboard-oauth-proxy-tls
+      - name: oauth-config
+        secret:
+          secretName: rhods-dashboard-oauth-config
+PROXYEOF
+
+  echo "  Creating dashboard UI service (port 8080)..."
+  kubectl apply -f - <<'UISVC'
+apiVersion: v1
+kind: Service
+metadata:
+  name: rhods-dashboard-ui
+  namespace: redhat-ods-applications
+spec:
+  selector:
+    app: rhods-dashboard
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+UISVC
+
+  echo "  Waiting for oauth-proxy deployment..."
+  kubectl rollout status deployment/rhods-dashboard-oauth-proxy -n redhat-ods-applications --timeout=120s
+
+  echo "  Creating dashboard route via oauth-proxy..."
+  kubectl delete route rhods-dashboard -n redhat-ods-applications 2>/dev/null || true
+  kubectl apply -f - <<ROUTEEOF
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: rhods-dashboard
+  namespace: redhat-ods-applications
+spec:
+  to:
+    kind: Service
+    name: rhods-dashboard-oauth-proxy
+  port:
+    targetPort: 8443
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+ROUTEEOF
+
+  sleep 3
+  HTTP_STATUS=$(curl -skI "https://${DASHBOARD_HOST}" -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+  if [ "$HTTP_STATUS" = "302" ] || [ "$HTTP_STATUS" = "303" ]; then
+    echo "  OAuth redirect working (HTTP $HTTP_STATUS)."
+  else
+    echo "  WARNING: Expected 302, got HTTP $HTTP_STATUS. OAuth may need a moment to sync."
+  fi
+  echo "  Dashboard URL: https://${DASHBOARD_HOST}"
+fi
+
+echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "  Dashboard route:"
