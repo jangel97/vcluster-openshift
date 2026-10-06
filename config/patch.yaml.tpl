@@ -64,9 +64,11 @@ spec:
           name: openshift-apiserver-config
         - mountPath: /var/serving-cert
           name: openshift-apiserver-serving-cert
-      - name: user-api-proxy
+      - name: openshift-compat-proxy
         image: NGINX_IMAGE
         ports:
+        - containerPort: 6443
+          name: api-proxy
         - containerPort: 8446
           name: user-api
         securityContext:
@@ -78,32 +80,12 @@ spec:
           name: data
           readOnly: true
         - mountPath: /etc/nginx/nginx.conf
-          name: user-api-proxy-config
+          name: openshift-compat-proxy-config
           subPath: nginx.conf
           readOnly: true
         - mountPath: /etc/nginx/proxy.js
-          name: user-api-proxy-config
+          name: openshift-compat-proxy-config
           subPath: proxy.js
-          readOnly: true
-      - name: oauth-metadata-proxy
-        image: NGINX_IMAGE
-        ports:
-        - containerPort: 6443
-          name: oauth-proxy
-        securityContext:
-          allowPrivilegeEscalation: false
-          runAsNonRoot: true
-          runAsUser: RUN_AS_USER
-        volumeMounts:
-        - mountPath: /data
-          name: data
-          readOnly: true
-        - mountPath: /etc/nginx/nginx.conf
-          name: nginx-config
-          subPath: nginx.conf
-          readOnly: true
-        - mountPath: /var/oauth-metadata
-          name: oauth-metadata
           readOnly: true
       volumes:
       - name: openshift-apiserver-config
@@ -114,15 +96,9 @@ spec:
           secretName: openshift-apiserver-serving-cert
       - name: openshift-etcd-data
         emptyDir: {}
-      - name: nginx-config
+      - name: openshift-compat-proxy-config
         configMap:
-          name: oauth-metadata-proxy-config
-      - name: oauth-metadata
-        configMap:
-          name: oauth-metadata
+          name: openshift-compat-proxy-config
       - name: webhook-token-auth
         configMap:
           name: webhook-token-auth
-      - name: user-api-proxy-config
-        configMap:
-          name: user-api-proxy-config

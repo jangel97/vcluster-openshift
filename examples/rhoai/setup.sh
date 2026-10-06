@@ -7,6 +7,7 @@ if [ -z "${HOST_CONTEXT:-}" ]; then
   exit 1
 fi
 NAMESPACE="${NAMESPACE:-vcluster-ocp}"
+VCLUSTER_NAME="${VCLUSTER_NAME:-ocp}"
 
 echo "=== Step 1: Copy service CA signing key and CA bundle from host ==="
 kubectl create namespace openshift-service-ca --dry-run=client -o yaml | kubectl apply -f -
@@ -207,8 +208,21 @@ else
     -o jsonpath='{.spec.domain}' 2>/dev/null || true)
   DASHBOARD_HOST="rhods-dashboard-redhat-ods-applications.${INGRESS_DOMAIN}"
 
+  echo "  Fetching OAuth metadata from host..."
+  OAUTH_METADATA=$(kubectl get --raw '/.well-known/oauth-authorization-server' --context "$HOST_CONTEXT" 2>/dev/null || true)
+  if [ -n "$OAUTH_METADATA" ]; then
+    OAUTH_LOGIN_URL=$(echo "$OAUTH_METADATA" | python3 -c "import sys,json; print(json.load(sys.stdin)['authorization_endpoint'])")
+    OAUTH_REDEEM_URL=$(echo "$OAUTH_METADATA" | python3 -c "import sys,json; print(json.load(sys.stdin)['token_endpoint'])")
+    echo "  OAuth login:  $OAUTH_LOGIN_URL"
+    echo "  OAuth redeem: $OAUTH_REDEEM_URL"
+  else
+    echo "  WARNING: Could not fetch OAuth metadata from host."
+    echo "  OAuth proxy will attempt auto-discovery (may fail in vCluster)."
+  fi
+
   OAUTH_CLIENT_SECRET=$(openssl rand -hex 16)
   COOKIE_SECRET=$(openssl rand -base64 32 | head -c 32)
+  TENANT_CLIENT_ID="vc-${VCLUSTER_NAME}-rhods-dashboard-oauth"
 
   echo "  Creating OAuthClient (synced to host by resource-syncer)..."
   kubectl apply -f - <<OAUTH
@@ -227,6 +241,66 @@ OAUTH
     --from-literal=cookie-secret="$COOKIE_SECRET" \
     -n redhat-ods-applications --dry-run=client -o yaml | kubectl apply -f -
 
+  echo "  Creating oauth-proxy ServiceAccount and RBAC..."
+  kubectl apply -f - <<'SAEOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rhods-dashboard-oauth-proxy
+  namespace: redhat-ods-applications
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rhods-dashboard-oauth-proxy-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: rhods-dashboard-oauth-proxy
+  namespace: redhat-ods-applications
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: oauth-proxy-serving-cert-reader
+  namespace: openshift-config-managed
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["oauth-serving-cert"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oauth-proxy-serving-cert-reader
+  namespace: openshift-config-managed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oauth-proxy-serving-cert-reader
+subjects:
+- kind: ServiceAccount
+  name: rhods-dashboard-oauth-proxy
+  namespace: redhat-ods-applications
+SAEOF
+
+  echo "  Creating trusted CA bundle (vCluster CA + ingress CA)..."
+  KUBE_CA=$(kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d)
+  INGRESS_CA_CERT=$(kubectl get configmap host-ingress-ca -n openshift-config-managed \
+    -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
+  CA_BUNDLE="${KUBE_CA}"
+  if [ -n "$INGRESS_CA_CERT" ]; then
+    CA_BUNDLE="${CA_BUNDLE}
+${INGRESS_CA_CERT}"
+  fi
+  kubectl create configmap oauth-proxy-trusted-ca \
+    --from-literal=ca.crt="$CA_BUNDLE" \
+    -n redhat-ods-applications --dry-run=client -o yaml | kubectl apply -f -
+
   echo "  Creating oauth-proxy Service (with service-ca TLS)..."
   kubectl apply -f - <<'SVCEOF'
 apiVersion: v1
@@ -238,10 +312,10 @@ metadata:
     service.beta.openshift.io/serving-cert-secret-name: rhods-dashboard-oauth-proxy-tls
 spec:
   selector:
-    app: rhods-dashboard-oauth-proxy
+    app: rhods-dashboard
   ports:
-  - port: 8443
-    targetPort: 8443
+  - port: 9443
+    targetPort: 9443
     name: https
 SVCEOF
 
@@ -255,77 +329,81 @@ SVCEOF
     sleep 2
   done
 
-  echo "  Deploying oauth-proxy..."
-  kubectl apply -f - <<PROXYEOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: rhods-dashboard-oauth-proxy
-  namespace: redhat-ods-applications
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: rhods-dashboard-oauth-proxy
-  template:
-    metadata:
-      labels:
-        app: rhods-dashboard-oauth-proxy
-    spec:
-      containers:
-      - name: oauth-proxy
-        image: ${OAUTH_PROXY_IMAGE}
-        args:
-        - --provider=openshift
-        - --https-address=:8443
-        - --upstream=http://rhods-dashboard.redhat-ods-applications.svc:8080
-        - --tls-cert=/etc/tls/private/tls.crt
-        - --tls-key=/etc/tls/private/tls.key
-        - --cookie-secret-file=/etc/oauth/cookie-secret
-        - --client-id=rhods-dashboard-oauth
-        - --client-secret-file=/etc/oauth/client-secret
-        - --openshift-delegate-urls={"/":{"resource":"projects","verb":"list","apiGroup":"project.openshift.io"}}
-        - --skip-provider-button=true
-        ports:
-        - containerPort: 8443
-        volumeMounts:
-        - name: tls
-          mountPath: /etc/tls/private
-          readOnly: true
-        - name: oauth-config
-          mountPath: /etc/oauth
-          readOnly: true
-      volumes:
-      - name: tls
-        secret:
-          secretName: rhods-dashboard-oauth-proxy-tls
-      - name: oauth-config
-        secret:
-          secretName: rhods-dashboard-oauth-config
-PROXYEOF
+  echo "  Scaling down dashboard operator (prevents reconciliation of sidecar)..."
+  kubectl scale deploy dashboard-operator -n redhat-ods-applications --replicas=0 2>/dev/null || true
 
-  echo "  Creating dashboard UI service (port 8080)..."
-  kubectl apply -f - <<'UISVC'
-apiVersion: v1
-kind: Service
-metadata:
-  name: rhods-dashboard-ui
-  namespace: redhat-ods-applications
-spec:
-  selector:
-    app: rhods-dashboard
-  ports:
-  - port: 8080
-    targetPort: 8080
-    name: http
-UISVC
+  OAUTH_EXTRA_ARGS=""
+  if [ -n "${OAUTH_LOGIN_URL:-}" ]; then
+    OAUTH_EXTRA_ARGS=", \"--login-url=${OAUTH_LOGIN_URL}\", \"--redeem-url=${OAUTH_REDEEM_URL}\""
+  fi
 
-  echo "  Waiting for oauth-proxy deployment..."
-  kubectl rollout status deployment/rhods-dashboard-oauth-proxy -n redhat-ods-applications --timeout=120s
+  echo "  Injecting oauth-proxy sidecar into dashboard pod..."
+  PATCH_FILE="/tmp/rhods-oauth-sidecar-patch.json"
+  cat > "$PATCH_FILE" <<PATCHEOF
+{
+  "spec": {
+    "template": {
+      "spec": {
+        "containers": [{
+          "name": "oauth-proxy",
+          "image": "${OAUTH_PROXY_IMAGE}",
+          "args": [
+            "--provider=openshift",
+            "--https-address=:9443",
+            "--upstream=http://127.0.0.1:8080",
+            "--tls-cert=/etc/oauth-tls/tls.crt",
+            "--tls-key=/etc/oauth-tls/tls.key",
+            "--cookie-secret-file=/etc/oauth/cookie-secret",
+            "--client-id=${TENANT_CLIENT_ID}",
+            "--client-secret-file=/etc/oauth/client-secret",
+            "--openshift-ca=/etc/oauth-ca/ca.crt",
+            "--openshift-delegate-urls={\"/\":{\"resource\":\"projects\",\"verb\":\"list\",\"apiGroup\":\"project.openshift.io\"}}",
+            "--skip-provider-button=true",
+            "--pass-access-token",
+            "--set-xauthrequest"${OAUTH_EXTRA_ARGS}
+          ],
+          "ports": [{"containerPort": 9443, "name": "oauth-proxy"}],
+          "volumeMounts": [
+            {"name": "oauth-tls", "mountPath": "/etc/oauth-tls", "readOnly": true},
+            {"name": "oauth-config", "mountPath": "/etc/oauth", "readOnly": true},
+            {"name": "oauth-trusted-ca", "mountPath": "/etc/oauth-ca", "readOnly": true}
+          ]
+        }],
+        "volumes": [
+          {"name": "oauth-tls", "secret": {"secretName": "rhods-dashboard-oauth-proxy-tls"}},
+          {"name": "oauth-config", "secret": {"secretName": "rhods-dashboard-oauth-config"}},
+          {"name": "oauth-trusted-ca", "configMap": {"name": "oauth-proxy-trusted-ca"}}
+        ]
+      }
+    }
+  }
+}
+PATCHEOF
+  kubectl patch deploy rhods-dashboard -n redhat-ods-applications --type strategic --patch-file "$PATCH_FILE"
+
+  echo "  Granting dashboard SA access to oauth-serving-cert..."
+  kubectl apply -f - <<'RBACEOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: oauth-serving-cert-reader-dashboard
+  namespace: openshift-config-managed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oauth-proxy-serving-cert-reader
+subjects:
+- kind: ServiceAccount
+  name: rhods-dashboard
+  namespace: redhat-ods-applications
+RBACEOF
+
+  echo "  Waiting for dashboard rollout with oauth-proxy sidecar..."
+  kubectl rollout status deployment/rhods-dashboard -n redhat-ods-applications --timeout=120s
 
   echo "  Creating dashboard route via oauth-proxy..."
   kubectl delete route rhods-dashboard -n redhat-ods-applications 2>/dev/null || true
-  kubectl apply -f - <<ROUTEEOF
+  kubectl apply -f - <<'ROUTEEOF'
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
@@ -336,7 +414,7 @@ spec:
     kind: Service
     name: rhods-dashboard-oauth-proxy
   port:
-    targetPort: 8443
+    targetPort: 9443
   tls:
     termination: reencrypt
     insecureEdgeTerminationPolicy: Redirect

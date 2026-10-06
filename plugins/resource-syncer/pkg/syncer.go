@@ -43,10 +43,6 @@ func NewSyncer[T client.Object](ctx *synccontext.RegisterContext, cfg SyncerConf
 	}
 }
 
-func IdentityHostName(_ *synccontext.SyncContext, vName, _ string) types.NamespacedName {
-	return types.NamespacedName{Name: vName}
-}
-
 type genericSyncer[T client.Object] struct {
 	syncertypes.GenericTranslator
 	syncFields func(ctx *synccontext.SyncContext, host, virtual T)

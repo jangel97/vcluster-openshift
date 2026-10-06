@@ -13,7 +13,7 @@ import (
 )
 
 var typedSyncers = map[schema.GroupVersionKind]func(*synccontext.RegisterContext) syncertypes.Base{
-	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}:   syncers.NewRouteSyncer,
+	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}:       syncers.NewRouteSyncer,
 	{Group: "oauth.openshift.io", Version: "v1", Kind: "OAuthClient"}: syncers.NewOAuthClientSyncer,
 }
 
@@ -41,6 +41,11 @@ func main() {
 			plugin.MustRegister(pkg.NewUnstructuredSyncer(ctx, gvk))
 		}
 	}
+
+	// SCC hook disabled for now — forcing restricted-v2 breaks workloads
+	// that legitimately need different UIDs (e.g. OLM catalog pods).
+	// Re-enable when full SCC bridge (syncer + RBAC + selection) is ready.
+	// plugin.MustRegister(&hooks.SCCHook{})
 
 	for {
 		klog.Infof("starting plugin...")

@@ -33,6 +33,28 @@ function buildHeaders(r) {
     return headers;
 }
 
+async function oauthMetadata(r) {
+    var token = readToken();
+    var url = hostAPI() + '/.well-known/oauth-authorization-server';
+
+    try {
+        var resp = await ngx.fetch(url, {
+            method: 'GET',
+            headers: { 'Authorization': 'Bearer ' + token },
+            verify: false
+        });
+        var body = await resp.text();
+        r.headersOut['Content-Type'] = 'application/json';
+        r.return(resp.status, body);
+    } catch (e) {
+        r.return(502, JSON.stringify({
+            kind: 'Status', apiVersion: 'v1', status: 'Failure',
+            message: 'failed to fetch OAuth metadata from host: ' + e.toString(),
+            reason: 'BadGateway', code: 502
+        }));
+    }
+}
+
 async function proxyToHost(r) {
     var headers = buildHeaders(r);
     if (!headers) {
@@ -78,4 +100,4 @@ async function readOnlyProxy(r) {
     return proxyToHost(r);
 }
 
-export default { proxyToHost, readOnlyProxy };
+export default { oauthMetadata, proxyToHost, readOnlyProxy };

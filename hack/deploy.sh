@@ -43,22 +43,28 @@ echo "  openshift-apiserver port: $OAS_PORT"
 echo "  nginx proxy: $NGINX_IMAGE"
 
 echo "=== Creating namespace ==="
-kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | retry kubectl apply -f -
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | \
+  yq ".metadata.labels.\"vcluster.io/managed-by\" = \"$VCLUSTER_NAME\" | .metadata.labels.\"vcluster.io/namespace\" = \"$NAMESPACE\"" | \
+  retry kubectl apply -f -
 
 echo "=== Granting privileged SCC to vCluster SA ==="
 retry oc adm policy add-scc-to-user privileged "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Granting route hostname permission to vCluster SA ==="
-ROUTE_ROLE='apiVersion: rbac.authorization.k8s.io/v1
+cat <<EOF | retry kubectl apply --context "$HOST_CONTEXT" -f -
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: vcluster-route-custom-host
+  name: vcluster-${VCLUSTER_NAME}-route-custom-host
+  labels:
+    vcluster.io/managed-by: ${VCLUSTER_NAME}
+    vcluster.io/namespace: ${NAMESPACE}
 rules:
   - apiGroups: ["route.openshift.io"]
     resources: ["routes/custom-host"]
-    verbs: ["create", "update"]'
-echo "$ROUTE_ROLE" | retry kubectl apply --context "$HOST_CONTEXT" -f -
-retry oc adm policy add-cluster-role-to-user vcluster-route-custom-host \
+    verbs: ["create", "update"]
+EOF
+retry oc adm policy add-cluster-role-to-user "vcluster-${VCLUSTER_NAME}-route-custom-host" \
   "system:serviceaccount:${NAMESPACE}:vc-${VCLUSTER_NAME}" --context "$HOST_CONTEXT"
 
 echo "=== Granting user API impersonation to vCluster SA ==="
@@ -67,6 +73,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: vcluster-${VCLUSTER_NAME}-user-api-impersonation
+  labels:
+    vcluster.io/managed-by: ${VCLUSTER_NAME}
+    vcluster.io/namespace: ${NAMESPACE}
 rules:
 - apiGroups: [""]
   resources: ["users", "groups"]
@@ -208,15 +217,6 @@ fi
 
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-apiserver.yaml.tpl" > "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml"
 
-OAUTH_METADATA=$(retry kubectl get --raw /.well-known/oauth-authorization-server --context "$HOST_CONTEXT" 2>/dev/null || true)
-if [ -n "$OAUTH_METADATA" ]; then
-  echo "$OAUTH_METADATA" > "/tmp/oauth-metadata-${VCLUSTER_NAME}.json"
-  echo "  OAuth metadata fetched from host"
-else
-  echo '{}' > "/tmp/oauth-metadata-${VCLUSTER_NAME}.json"
-  echo "  WARNING: Could not fetch OAuth metadata from host — OAuth discovery will not work"
-fi
-
 # Build all ConfigMaps into a temp file and apply in a single call
 CONFIGMAPS_FILE="/tmp/vcluster-configmaps-${VCLUSTER_NAME}.yaml"
 cat > "$CONFIGMAPS_FILE" <<RESOURCES
@@ -241,31 +241,13 @@ $(sed 's/^/    /' "$ROOT_DIR/config/webhook-token-auth.yaml")
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: user-api-proxy-config
+  name: openshift-compat-proxy-config
   namespace: ${NAMESPACE}
 data:
   nginx.conf: |
-$(sed 's/^/    /' "$ROOT_DIR/config/user-api-proxy.nginx.conf")
+$(sed 's/^/    /' "$ROOT_DIR/config/openshift-compat-proxy.nginx.conf")
   proxy.js: |
-$(sed 's/^/    /' "$ROOT_DIR/config/proxy.js")
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: oauth-metadata
-  namespace: ${NAMESPACE}
-data:
-  metadata.json: |
-$(sed 's/^/    /' "/tmp/oauth-metadata-${VCLUSTER_NAME}.json")
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: oauth-metadata-proxy-config
-  namespace: ${NAMESPACE}
-data:
-  nginx.conf: |
-$(sed 's/^/    /' "$ROOT_DIR/config/nginx.conf.tpl")
+$(sed 's/^/    /' "$ROOT_DIR/config/openshift-compat-proxy.js")
 RESOURCES
 retry kubectl apply -f "$CONFIGMAPS_FILE"
 
@@ -280,6 +262,9 @@ retry oc adm policy add-cluster-role-to-user system:auth-delegator \
 echo "=== Patching vCluster workload with sidecars ==="
 PATCH_FILE="/tmp/vcluster-patch-${VCLUSTER_NAME}.yaml"
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/patch.yaml.tpl" > "$PATCH_FILE"
+if [ -z "$RUN_AS_USER" ]; then
+  sed -i'' -e '/runAsUser: RUN_AS_USER/d' "$PATCH_FILE"
+fi
 if kubectl get statefulset "$VCLUSTER_NAME" -n "$NAMESPACE" &>/dev/null; then
   WORKLOAD_TYPE="statefulset"
 else
@@ -296,6 +281,9 @@ kind: Service
 metadata:
   name: ${VCLUSTER_NAME}-openshift-apis
   namespace: ${NAMESPACE}
+  labels:
+    vcluster.io/managed-by: ${VCLUSTER_NAME}
+    vcluster.io/namespace: ${NAMESPACE}
 spec:
   selector:
     app: vcluster
@@ -421,6 +409,18 @@ if [ -n "$INGRESS_CA" ]; then
   echo "  Ingress CA stored in openshift-config-managed/host-ingress-ca"
 else
   echo "  WARNING: Could not fetch ingress CA from host"
+fi
+
+echo "=== Copying host OAuth serving cert into vCluster ==="
+OAUTH_SERVING_CERT=$(retry kubectl get configmap oauth-serving-cert -n openshift-config-managed \
+  --context "$HOST_CONTEXT" -o jsonpath='{.data.ca-bundle\.crt}' 2>/dev/null || true)
+if [ -n "$OAUTH_SERVING_CERT" ]; then
+  kubectl create configmap oauth-serving-cert \
+    --from-literal="ca-bundle.crt=$OAUTH_SERVING_CERT" \
+    -n openshift-config-managed --dry-run=client -o yaml | kubectl apply -f -
+  echo "  OAuth serving cert stored in openshift-config-managed/oauth-serving-cert"
+else
+  echo "  WARNING: Could not fetch OAuth serving cert from host"
 fi
 
 echo "=== Registering APIServices ==="
