@@ -466,6 +466,69 @@ for i in $(seq 1 30); do
   sleep 10
 done
 
+echo "=== Granting nonroot-v2 SCC to OLM catalog service accounts ==="
+kubectl apply -f - <<'SCCEOF'
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: nonroot-v2
+priority: 5
+allowPrivilegedContainer: false
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegeEscalation: false
+requiredDropCapabilities:
+  - ALL
+runAsUser:
+  type: MustRunAsNonRoot
+seLinuxContext:
+  type: MustRunAs
+fsGroup:
+  type: MustRunAs
+supplementalGroups:
+  type: RunAsAny
+seccompProfiles:
+  - runtime/default
+volumes:
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - projected
+  - secret
+  - persistentVolumeClaim
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: use-nonroot-v2
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["nonroot-v2"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: olm-catalogs-nonroot-v2
+  namespace: olm
+subjects:
+  - kind: ServiceAccount
+    name: operatorhubio-catalog
+    namespace: olm
+  - kind: ServiceAccount
+    name: redhat-operators
+    namespace: olm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: use-nonroot-v2
+SCCEOF
+echo "  nonroot-v2 SCC granted to OLM catalog SAs."
+
 echo "=== Copying pull secret for registry.redhat.io ==="
 HOST_PULL_SECRET=$(kubectl get secret pull-secret -n openshift-config --context "$HOST_CONTEXT" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null || true)
 if [ -n "$HOST_PULL_SECRET" ]; then
