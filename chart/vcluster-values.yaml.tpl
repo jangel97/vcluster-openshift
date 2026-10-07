@@ -67,16 +67,30 @@ plugins:
           kind: Route
         - apiVersion: oauth.openshift.io/v1
           kind: OAuthClient
+        - apiVersion: security.openshift.io/v1
+          kind: SecurityContextConstraints
     rbac:
       role:
         extraRules:
           - apiGroups: ["route.openshift.io"]
             resources: ["routes", "routes/status"]
             verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: ["security.openshift.io"]
+            resources: ["securitycontextconstraints"]
+            verbs: ["get", "list", "watch"]
       clusterRole:
         extraRules:
           - apiGroups: ["oauth.openshift.io"]
             resources: ["oauthclients"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: ["security.openshift.io"]
+            resources: ["securitycontextconstraints"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "use"]
+          - apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["clusterroles", "clusterrolebindings"]
             verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 experimental:
   deploy:

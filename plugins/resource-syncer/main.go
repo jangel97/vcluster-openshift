@@ -1,6 +1,7 @@
 package main
 
 import (
+	"resource-syncer/hooks"
 	"resource-syncer/pkg"
 	"resource-syncer/syncers"
 	"time"
@@ -13,8 +14,9 @@ import (
 )
 
 var typedSyncers = map[schema.GroupVersionKind]func(*synccontext.RegisterContext) syncertypes.Base{
-	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}:       syncers.NewRouteSyncer,
-	{Group: "oauth.openshift.io", Version: "v1", Kind: "OAuthClient"}: syncers.NewOAuthClientSyncer,
+	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}:                   syncers.NewRouteSyncer,
+	{Group: "oauth.openshift.io", Version: "v1", Kind: "OAuthClient"}:             syncers.NewOAuthClientSyncer,
+	{Group: "security.openshift.io", Version: "v1", Kind: "SecurityContextConstraints"}: syncers.NewSCCSyncer,
 }
 
 func main() {
@@ -42,10 +44,15 @@ func main() {
 		}
 	}
 
-	// SCC hook disabled for now — forcing restricted-v2 breaks workloads
-	// that legitimately need different UIDs (e.g. OLM catalog pods).
-	// Re-enable when full SCC bridge (syncer + RBAC + selection) is ready.
-	// plugin.MustRegister(&hooks.SCCHook{})
+	// SCC RBAC bridge: watches virtual RBAC bindings that grant SCC use and
+	// creates corresponding host ClusterRoles/ClusterRoleBindings
+	sccRBACBridge := syncers.NewSCCRBACBridge(ctx)
+	plugin.MustRegister(sccRBACBridge)
+
+	// SCC pod mutation hook: selects the correct SCC for each pod based on
+	// virtual RBAC grants, sets openshift.io/required-scc on host pods
+	sccHook := hooks.NewSCCHook(ctx.Config.Name, ctx.VirtualManager.GetClient())
+	plugin.MustRegister(sccHook)
 
 	for {
 		klog.Infof("starting plugin...")

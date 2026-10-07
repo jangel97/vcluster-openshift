@@ -89,11 +89,11 @@ Host OpenShift remains the actual enforcement layer.
 
 ## Implementation Order
 
-1. Pod mutation hook — inject `openshift.io/required-scc: restricted-v2` on all host pods (baseline)
-2. SCC syncer — sync virtual SCCs to prefixed host SCCs
-3. RBAC bridge — sync virtual SCC grants to host RBAC
-4. SCC selection logic — evaluate SA grants and pick the right SCC
-5. Tests A-E
+1. ~~Pod mutation hook — inject `openshift.io/required-scc: restricted-v2` on all host pods (baseline)~~ **DONE** — `plugins/resource-syncer/hooks/scc.go`
+2. ~~SCC syncer — sync virtual SCCs to prefixed host SCCs~~ **DONE** — `plugins/resource-syncer/syncers/scc.go`
+3. ~~RBAC bridge — sync virtual SCC grants to host RBAC~~ **DONE** — `plugins/resource-syncer/syncers/sccrbac.go`
+4. ~~SCC selection logic — evaluate SA grants and pick the right SCC~~ **DONE** — upgraded `plugins/resource-syncer/hooks/scc.go`
+5. ~~Tests A-E~~ **DONE** — all 5 tests passed on live SNC cluster
 
 ## Notes
 
