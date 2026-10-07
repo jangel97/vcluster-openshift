@@ -17,6 +17,7 @@ VCLUSTER_BIN="$3"
 HOST_CONTEXT="$4"
 OPENSHIFT_APISERVER_IMAGE="$5"
 RESOURCE_SYNCER_IMAGE="${6:-}"
+SERVICE_CA_OPERATOR_IMAGE="${7:-}"
 
 if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
   echo "ERROR: OPENSHIFT_APISERVER_IMAGE is required."
@@ -422,6 +423,79 @@ if [ -n "$OAUTH_SERVING_CERT" ]; then
 else
   echo "  WARNING: Could not fetch OAuth serving cert from host"
 fi
+
+echo "=== Deploying service-ca-operator ==="
+kubectl create namespace openshift-service-ca --dry-run=client -o yaml | kubectl apply -f -
+
+retry kubectl get secret signing-key -n openshift-service-ca --context "$HOST_CONTEXT" -o json | \
+  jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.namespace, .metadata.managedFields, .metadata.annotations, .metadata.labels) | .metadata.name = "service-ca-signing-key"' | \
+  kubectl apply -n openshift-service-ca -f -
+
+retry kubectl get configmap signing-cabundle -n openshift-service-ca --context "$HOST_CONTEXT" -o json | \
+  jq 'del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.namespace, .metadata.managedFields, .metadata.annotations, .metadata.labels)' | \
+  kubectl apply -n openshift-service-ca -f -
+
+if [ -z "$SERVICE_CA_OPERATOR_IMAGE" ]; then
+  SERVICE_CA_OPERATOR_IMAGE=$(oc adm release info --image-for=service-ca-operator 2>/dev/null || true)
+fi
+if [ -z "$SERVICE_CA_OPERATOR_IMAGE" ]; then
+  echo "  WARNING: SERVICE_CA_OPERATOR_IMAGE not set and could not auto-detect."
+  echo "  Skipping service-ca-operator deployment."
+  echo "  Set SERVICE_CA_OPERATOR_IMAGE or pass it as the 7th argument."
+else
+  sed "s|SERVICE_CA_OPERATOR_IMAGE|$SERVICE_CA_OPERATOR_IMAGE|g" "$ROOT_DIR/manifests/service-ca.yaml" | kubectl apply -f -
+  echo "  Waiting for service-ca controller..."
+  kubectl rollout status deployment/service-ca -n openshift-service-ca --timeout=120s
+  echo "  service-ca-operator is running."
+fi
+
+echo "=== Installing OLM ==="
+if kubectl get deployment olm-operator -n olm &>/dev/null; then
+  echo "  OLM already installed, skipping."
+else
+  curl -sL https://github.com/operator-framework/operator-lifecycle-manager/releases/download/v0.28.0/install.sh | bash -s v0.28.0
+fi
+
+echo "  Waiting for OLM catalog pod..."
+for i in $(seq 1 30); do
+  if kubectl get pod -n olm -l olm.catalogSource=operatorhubio-catalog 2>/dev/null | grep -q "1/1"; then
+    echo "  OLM catalog is ready."
+    break
+  fi
+  echo "  Waiting for catalog pod (attempt $i/30)..."
+  sleep 10
+done
+
+echo "=== Copying pull secret for registry.redhat.io ==="
+HOST_PULL_SECRET=$(kubectl get secret pull-secret -n openshift-config --context "$HOST_CONTEXT" -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null || true)
+if [ -n "$HOST_PULL_SECRET" ]; then
+  kubectl create secret docker-registry pull-secret \
+    --from-file=.dockerconfigjson=<(echo "$HOST_PULL_SECRET" | base64 -d) \
+    -n olm --dry-run=client -o yaml | kubectl apply -f -
+  kubectl patch serviceaccount default -n olm -p '{"imagePullSecrets":[{"name":"pull-secret"}]}' 2>/dev/null || true
+  echo "  Pull secret copied to olm namespace."
+else
+  echo "  WARNING: Could not copy pull secret from host."
+  echo "  Red Hat operator catalogs may fail to pull."
+fi
+
+echo "=== Creating OpenShift prerequisites ==="
+kubectl create namespace openshift-ingress --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f - <<'PREREQEOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-monitoring-view
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get"]
+PREREQEOF
+
+echo "  Installing Gateway API CRDs..."
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml 2>&1 | tail -1
+echo "  OpenShift prerequisites created."
 
 echo "=== Registering APIServices ==="
 APISERVICE_YAML=""
