@@ -69,6 +69,24 @@ plugins:
           kind: OAuthClient
         - apiVersion: security.openshift.io/v1
           kind: SecurityContextConstraints
+      sccCeiling:
+        allowPrivilegedContainer: false
+        allowHostNetwork: false
+        allowHostPorts: false
+        allowHostPID: false
+        allowHostIPC: false
+        allowHostDirVolumePlugin: false
+        allowPrivilegeEscalation: true
+        volumes:
+          - configMap
+          - downwardAPI
+          - emptyDir
+          - projected
+          - secret
+          - persistentVolumeClaim
+        allowedCapabilities: []
+        runAsUser:
+          type: MustRunAsNonRoot
     rbac:
       role:
         extraRules:

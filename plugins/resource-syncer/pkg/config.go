@@ -3,7 +3,8 @@ package pkg
 import "k8s.io/apimachinery/pkg/runtime/schema"
 
 type PluginConfig struct {
-	Resources []ResourceConfig `json:"resources"`
+	Resources  []ResourceConfig       `json:"resources"`
+	SCCCeiling map[string]interface{} `json:"sccCeiling,omitempty"`
 }
 
 type ResourceConfig struct {

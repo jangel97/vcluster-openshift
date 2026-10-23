@@ -13,10 +13,11 @@ import (
 	"k8s.io/klog/v2"
 )
 
+var sccGVK = schema.GroupVersionKind{Group: "security.openshift.io", Version: "v1", Kind: "SecurityContextConstraints"}
+
 var typedSyncers = map[schema.GroupVersionKind]func(*synccontext.RegisterContext) syncertypes.Base{
-	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}:                   syncers.NewRouteSyncer,
-	{Group: "oauth.openshift.io", Version: "v1", Kind: "OAuthClient"}:             syncers.NewOAuthClientSyncer,
-	{Group: "security.openshift.io", Version: "v1", Kind: "SecurityContextConstraints"}: syncers.NewSCCSyncer,
+	{Group: "route.openshift.io", Version: "v1", Kind: "Route"}:       syncers.NewRouteSyncer,
+	{Group: "oauth.openshift.io", Version: "v1", Kind: "OAuthClient"}: syncers.NewOAuthClientSyncer,
 }
 
 func main() {
@@ -35,7 +36,10 @@ func main() {
 
 	for _, res := range cfg.Resources {
 		gvk := res.GVK()
-		if newSyncer, ok := typedSyncers[gvk]; ok {
+		if gvk == sccGVK {
+			klog.Infof("registering SCC syncer with ceiling validation")
+			plugin.MustRegister(syncers.NewSCCSyncer(ctx, cfg.SCCCeiling))
+		} else if newSyncer, ok := typedSyncers[gvk]; ok {
 			klog.Infof("registering typed syncer for %s", gvk)
 			plugin.MustRegister(newSyncer(ctx))
 		} else {
