@@ -32,7 +32,7 @@ controlPlane:
     image:
       registry: ghcr.io
       repository: loft-sh/vcluster-oss
-      tag: 0.37.0
+      tag: 0.37.6
     resources:
       limits:
         cpu: "4"
