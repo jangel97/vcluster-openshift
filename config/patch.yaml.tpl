@@ -173,6 +173,26 @@ spec:
           name: openshift-apiserver-serving-cert
         - mountPath: /var/oauth-audit
           name: oauth-apiserver-audit-config
+      - name: crd-bootstrap
+        image: HYPERKUBE_IMAGE
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            grep 'client-certificate-data' /data/pki/admin.conf | awk '{print $2}' | base64 -d > /tmp/c.crt
+            grep 'client-key-data' /data/pki/admin.conf | awk '{print $2}' | base64 -d > /tmp/c.key
+            until curl -sk --cert /tmp/c.crt --key /tmp/c.key https://127.0.0.1:6444/healthz >/dev/null 2>&1; do sleep 0.5; done
+            CRD='{"apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition","metadata":{"name":"rolebindingrestrictions.authorization.openshift.io"},"spec":{"group":"authorization.openshift.io","names":{"kind":"RoleBindingRestriction","listKind":"RoleBindingRestrictionList","plural":"rolebindingrestrictions","singular":"rolebindingrestriction"},"scope":"Namespaced","versions":[{"name":"v1","served":true,"storage":true,"schema":{"openAPIV3Schema":{"type":"object","x-kubernetes-preserve-unknown-fields":true}}}]}}'
+            curl -sk --cert /tmp/c.crt --key /tmp/c.key -H 'Content-Type: application/json' -X POST https://127.0.0.1:6444/apis/apiextensions.k8s.io/v1/customresourcedefinitions -d "$CRD" -o /dev/null -w '%{http_code}\n'
+            echo "CRD bootstrap done"
+            sleep infinity
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: RUN_AS_USER
+        volumeMounts:
+        - mountPath: /data
+          name: data
+          readOnly: true
       - name: openshift-compat-proxy
         image: NGINX_IMAGE
         ports:
