@@ -102,6 +102,7 @@ NAMESPACE=my-vcluster VCLUSTER_NAME=my-ocp OPENSHIFT_APISERVER_IMAGE=<image> mak
 |----------|---------|-------------|
 | `OPENSHIFT_APISERVER_IMAGE` | *(required)* | openshift-apiserver image from your OCP release |
 | `OCM_IMAGE` | *(auto-detected)* | openshift-controller-manager image (auto-detected via `oc adm release info --image-for=openshift-controller-manager`) |
+| `CPC_IMAGE` | *(auto-detected)* | cluster-policy-controller image (auto-detected via `oc adm release info --image-for=cluster-policy-controller`) |
 | `NAMESPACE` | `vcluster-ocp` | Host namespace for the vCluster |
 | `VCLUSTER_NAME` | `ocp` | vCluster name |
 | `VCLUSTER_BIN` | `vcluster` | Path to vcluster binary |

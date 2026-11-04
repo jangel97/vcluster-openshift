@@ -4,6 +4,7 @@ VCLUSTER_BIN           ?= vcluster
 HOST_CONTEXT           ?= $(shell kubectl config current-context)
 OPENSHIFT_APISERVER_IMAGE ?=
 OCM_IMAGE                 ?=
+CPC_IMAGE                 ?=
 RESOURCE_SYNCER_IMAGE     ?=
 SERVICE_CA_OPERATOR_IMAGE ?=
 
@@ -13,7 +14,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 deploy: generate-cert ## Deploy vCluster with OpenShift APIs (full end-to-end)
-	@bash hack/deploy.sh "$(NAMESPACE)" "$(VCLUSTER_NAME)" "$(VCLUSTER_BIN)" "$(HOST_CONTEXT)" "$(OPENSHIFT_APISERVER_IMAGE)" "$(RESOURCE_SYNCER_IMAGE)" "$(SERVICE_CA_OPERATOR_IMAGE)" "$(OCM_IMAGE)"
+	@bash hack/deploy.sh "$(NAMESPACE)" "$(VCLUSTER_NAME)" "$(VCLUSTER_BIN)" "$(HOST_CONTEXT)" "$(OPENSHIFT_APISERVER_IMAGE)" "$(RESOURCE_SYNCER_IMAGE)" "$(SERVICE_CA_OPERATOR_IMAGE)" "$(OCM_IMAGE)" "$(CPC_IMAGE)"
 
 teardown: ## Tear down vCluster and clean up
 	-$(VCLUSTER_BIN) disconnect 2>/dev/null

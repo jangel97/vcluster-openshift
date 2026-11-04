@@ -15,6 +15,10 @@ openshiftApiserver:
 openshiftControllerManager:
   port: 8445
 
+# cluster-policy-controller sidecar (SCC enforcement, RBAC policies)
+clusterPolicyController:
+  port: 10357
+
 # nginx reverse proxy for OAuth metadata discovery
 nginx:
   image: nginxinc/nginx-unprivileged:1.27-alpine

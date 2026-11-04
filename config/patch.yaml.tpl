@@ -91,6 +91,30 @@ spec:
           name: openshift-controller-manager-config
         - mountPath: /var/serving-cert
           name: openshift-apiserver-serving-cert
+      - name: cluster-policy-controller
+        image: CPC_IMAGE
+        command:
+        - cluster-policy-controller
+        - start
+        - --config=/var/cpc-config/config.yaml
+        - --kubeconfig=/data/pki/admin.conf
+        - --namespace=openshift-kube-controller-manager
+        env:
+        - name: KUBERNETES_SERVICE_HOST
+          value: "127.0.0.1"
+        - name: KUBERNETES_SERVICE_PORT
+          value: "6444"
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: RUN_AS_USER
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /var/cpc-config
+          name: cluster-policy-controller-config
+        - mountPath: /var/serving-cert
+          name: openshift-apiserver-serving-cert
       - name: openshift-compat-proxy
         image: NGINX_IMAGE
         ports:
@@ -129,6 +153,9 @@ spec:
       - name: openshift-controller-manager-config
         configMap:
           name: openshift-controller-manager-config
+      - name: cluster-policy-controller-config
+        configMap:
+          name: cluster-policy-controller-config
       - name: webhook-token-auth
         configMap:
           name: webhook-token-auth

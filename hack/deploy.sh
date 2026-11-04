@@ -19,6 +19,7 @@ OPENSHIFT_APISERVER_IMAGE="$5"
 RESOURCE_SYNCER_IMAGE="${6:-}"
 SERVICE_CA_OPERATOR_IMAGE="${7:-}"
 OCM_IMAGE="${8:-}"
+CPC_IMAGE="${9:-}"
 
 if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
   echo "ERROR: OPENSHIFT_APISERVER_IMAGE is required."
@@ -44,6 +45,20 @@ if [ -z "$OCM_IMAGE" ]; then
   echo "  OCM_IMAGE=<image> make deploy"
   exit 1
 fi
+
+if [ -z "$CPC_IMAGE" ]; then
+  CPC_IMAGE=$(oc adm release info --image-for=cluster-policy-controller 2>/dev/null || true)
+fi
+if [ -z "$CPC_IMAGE" ]; then
+  echo "ERROR: CPC_IMAGE is required."
+  echo ""
+  echo "Get it from your OCP cluster:"
+  echo "  oc adm release info --image-for=cluster-policy-controller"
+  echo ""
+  echo "Then run:"
+  echo "  CPC_IMAGE=<image> make deploy"
+  exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ROOT_DIR/config.yaml"
@@ -54,11 +69,12 @@ ETCD_CLIENT_PORT=$(yq '.etcd.clientPort' "$CONFIG")
 ETCD_PEER_PORT=$(yq '.etcd.peerPort' "$CONFIG")
 OAS_PORT=$(yq '.openshiftApiserver.port' "$CONFIG")
 OCM_PORT=$(yq '.openshiftControllerManager.port' "$CONFIG")
+CPC_PORT=$(yq '.clusterPolicyController.port' "$CONFIG")
 NGINX_IMAGE=$(yq '.nginx.image' "$CONFIG")
 echo "  etcd: $ETCD_IMAGE (ports: $ETCD_CLIENT_PORT/$ETCD_PEER_PORT)"
 echo "  openshift-apiserver port: $OAS_PORT"
-echo "  openshift-controller-manager port: $OCM_PORT"
-echo "  openshift-controller-manager image: $OCM_IMAGE"
+echo "  openshift-controller-manager: $OCM_IMAGE (port: $OCM_PORT)"
+echo "  cluster-policy-controller: $CPC_IMAGE (port: $CPC_PORT)"
 echo "  nginx proxy: $NGINX_IMAGE"
 
 echo "=== Creating namespace ==="
@@ -230,6 +246,8 @@ TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_PEER_PORT|$ETCD_PEER_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OPENSHIFT_APISERVER_PORT|$OAS_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OCM_IMAGE|$OCM_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OCM_PORT|$OCM_PORT|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|CPC_IMAGE|$CPC_IMAGE|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|CPC_PORT|$CPC_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|NGINX_IMAGE|$NGINX_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ROUTING_SUBDOMAIN|$ROUTING_SUBDOMAIN|g"
 if [ -n "$RUN_AS_USER" ]; then
@@ -238,6 +256,7 @@ fi
 
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-apiserver.yaml.tpl" > "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml"
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-controller-manager.yaml.tpl" > "/tmp/openshift-controller-manager-${VCLUSTER_NAME}.yaml"
+sed "$TEMPLATE_SED" "$ROOT_DIR/config/cluster-policy-controller.yaml.tpl" > "/tmp/cluster-policy-controller-${VCLUSTER_NAME}.yaml"
 
 # Build all ConfigMaps into a temp file and apply in a single call
 CONFIGMAPS_FILE="/tmp/vcluster-configmaps-${VCLUSTER_NAME}.yaml"
@@ -259,6 +278,15 @@ metadata:
 data:
   config.yaml: |
 $(sed 's/^/    /' "/tmp/openshift-controller-manager-${VCLUSTER_NAME}.yaml")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-policy-controller-config
+  namespace: ${NAMESPACE}
+data:
+  config.yaml: |
+$(sed 's/^/    /' "/tmp/cluster-policy-controller-${VCLUSTER_NAME}.yaml")
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -397,6 +425,7 @@ done
 
 echo "=== Creating namespaces for controller leader election ==="
 kubectl create namespace openshift-controller-manager --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace openshift-kube-controller-manager --dry-run=client -o yaml | kubectl apply -f -
 
 echo "=== Verifying CRDs ==="
 REMAINING=("${CRD_NAMES[@]}")
