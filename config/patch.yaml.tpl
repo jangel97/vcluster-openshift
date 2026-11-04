@@ -4,7 +4,7 @@ spec:
       initContainers:
       - name: copy-hyperkube
         image: HYPERKUBE_IMAGE
-        command: ["cp", "/usr/bin/kube-apiserver", "/binaries/ocp-kube-apiserver"]
+        command: ["/bin/bash", "-c", "cp -v /usr/bin/kube-apiserver /binaries/ocp-kube-apiserver && ls -la /binaries/ && echo COPY_DONE"]
         securityContext:
           allowPrivilegeEscalation: false
           runAsNonRoot: true
