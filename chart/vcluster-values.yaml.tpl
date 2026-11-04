@@ -21,6 +21,9 @@ controlPlane:
     k8s:
       apiServer:
         command:
+          - /binaries/lib64/ld-linux-x86-64.so.2
+          - --library-path
+          - /binaries/lib64
           - /binaries/ocp-kube-apiserver
           - --openshift-config=/var/ocp-kas-config/config.json
         extraArgs:
