@@ -11,6 +11,10 @@ etcd:
 openshiftApiserver:
   port: 8444
 
+# openshift-controller-manager sidecar (ImageStream imports, build controller)
+openshiftControllerManager:
+  port: 8445
+
 # nginx reverse proxy for OAuth metadata discovery
 nginx:
   image: nginxinc/nginx-unprivileged:1.27-alpine

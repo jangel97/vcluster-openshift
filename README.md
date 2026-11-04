@@ -42,19 +42,28 @@ The overhead is bounded: two extra containers (etcd + apiserver) in the same pod
 
 ```
 vCluster StatefulSet pod
-├── syncer              (kube-apiserver + kine + controller-manager)
-├── openshift-etcd      (dedicated etcd for openshift-apiserver, port 2479)
-└── openshift-apiserver (aggregated API server, port 8444)
-    ├── connects to openshift-etcd at https://127.0.0.1:2479
-    ├── delegates auth to kube-apiserver at https://127.0.0.1:6443
-    └── uses front-proxy certs for API aggregation
+├── syncer                        (kube-apiserver + kine + controller-manager)
+├── openshift-etcd                (dedicated etcd for OpenShift API servers, port 2479)
+├── openshift-apiserver           (aggregated API server, port 8444)
+│   ├── connects to openshift-etcd at https://127.0.0.1:2479
+│   ├── delegates auth to kube-apiserver at https://127.0.0.1:6443
+│   └── uses front-proxy certs for API aggregation
+├── openshift-controller-manager  (ImageStream imports, build/deploy controllers, port 8445)
+│   └── talks to kube-apiserver via kubeconfig (no etcd access)
+├── cluster-policy-controller     (SCC enforcement, RBAC policies, port 10357)
+│   └── talks to kube-apiserver via kubeconfig (no etcd access)
+├── openshift-oauth-apiserver     (User, Group, OAuthClient APIs, port 8447)
+│   ├── connects to shared openshift-etcd at https://127.0.0.1:2479
+│   └── delegates auth to kube-apiserver via request headers
+└── openshift-compat-proxy        (nginx: OAuth metadata + API proxy)
 
 Inside vCluster:
 ├── APIServices auto-discovered from openshift-apiserver and registered dynamically
+├── APIServices for oauth-apiserver (user.openshift.io, oauth.openshift.io)
 └── CRDs + cluster resources fetched from the host OCP cluster (configured in config.yaml)
 ```
 
-Everything runs in a single pod. The openshift-apiserver talks to its own etcd over localhost, delegates authentication back to the vCluster's kube-apiserver, and registers itself through standard APIService objects. From the perspective of anything running inside the vCluster, the OpenShift APIs just exist.
+Everything runs in a single pod. The OpenShift API servers talk to a shared etcd over localhost, delegate authentication back to the vCluster's kube-apiserver, and register themselves through standard APIService objects. The controller-manager and policy controller only need a kubeconfig to the kube-apiserver. From the perspective of anything running inside the vCluster, the OpenShift APIs just exist.
 
 ## Prerequisites
 
@@ -92,6 +101,7 @@ NAMESPACE=my-vcluster VCLUSTER_NAME=my-ocp OPENSHIFT_APISERVER_IMAGE=<image> mak
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENSHIFT_APISERVER_IMAGE` | *(required)* | openshift-apiserver image from your OCP release |
+| `OCM_IMAGE` | *(auto-detected)* | openshift-controller-manager image (auto-detected via `oc adm release info --image-for=openshift-controller-manager`) |
 | `NAMESPACE` | `vcluster-ocp` | Host namespace for the vCluster |
 | `VCLUSTER_NAME` | `ocp` | vCluster name |
 | `VCLUSTER_BIN` | `vcluster` | Path to vcluster binary |
@@ -108,12 +118,14 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 - ImageStream create, update, delete
 - OpenShift API groups auto-discovered and registered as APIServices
 - Auth delegation from openshift-apiserver to vCluster's kube-apiserver
+- ImageStream imports from external registries (via openshift-controller-manager)
+- SCC enforcement (via cluster-policy-controller)
+- User/Group/OAuthClient APIs (via openshift-oauth-apiserver)
 
 ## What's not yet tested
 
 - Route creation (the APIService is registered, but there's no ingress controller)
 - ODH/RHOAI workbenches actually using these ImageStreams
-- `openshift-controller-manager` (needed for ImageStream import from external registries)
 - Persistence across pod restarts (etcd data lives in emptyDir)
 
 ## Repo structure
@@ -132,8 +144,11 @@ UID ranges are auto-detected from the namespace annotation during deploy. No man
 │   └── endpoints.yaml
 ├── config.yaml               # Central config (etcd image, ports, API groups, CRDs)
 ├── config/
-│   ├── openshift-apiserver.yaml.tpl  # openshift-apiserver config template
-│   └── patch.yaml.tpl               # StatefulSet patch template (sidecars)
+│   ├── openshift-apiserver.yaml.tpl           # openshift-apiserver config template
+│   ├── openshift-controller-manager.yaml.tpl  # openshift-controller-manager config template
+│   ├── cluster-policy-controller.yaml.tpl     # cluster-policy-controller config template
+│   ├── oauth-apiserver-audit-policy.yaml      # oauth-apiserver audit policy (no-op)
+│   └── patch.yaml.tpl                        # StatefulSet patch template (sidecars)
 ├── plugins/
 │   └── resource-syncer/      # vCluster plugin: syncs configured resources to host cluster
 │       ├── main.go
@@ -185,10 +200,6 @@ OPENSHIFT_APISERVER_IMAGE=... make deploy
 Resources with a registered typed syncer (like Routes) get special handling — e.g., Service name translation for Route backends. Everything else gets a generic syncer that copies spec and status.
 
 Without the plugin, resources exist in the vCluster API but aren't visible on the host. Use `kubectl port-forward` to access services directly in that case.
-
-### No openshift-controller-manager
-
-We don't deploy the `openshift-controller-manager`. That means ImageStream import from external registries (image resolution, scheduled imports) doesn't work. ImageStreams with local references are fine.
 
 ### Etcd data is ephemeral
 

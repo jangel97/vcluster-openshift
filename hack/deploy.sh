@@ -18,6 +18,7 @@ HOST_CONTEXT="$4"
 OPENSHIFT_APISERVER_IMAGE="$5"
 RESOURCE_SYNCER_IMAGE="${6:-}"
 SERVICE_CA_OPERATOR_IMAGE="${7:-}"
+OCM_IMAGE="${8:-}"
 
 if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
   echo "ERROR: OPENSHIFT_APISERVER_IMAGE is required."
@@ -29,6 +30,20 @@ if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
   echo "  OPENSHIFT_APISERVER_IMAGE=<image> make deploy"
   exit 1
 fi
+
+if [ -z "$OCM_IMAGE" ]; then
+  OCM_IMAGE=$(oc adm release info --image-for=openshift-controller-manager 2>/dev/null || true)
+fi
+if [ -z "$OCM_IMAGE" ]; then
+  echo "ERROR: OCM_IMAGE is required."
+  echo ""
+  echo "Get it from your OCP cluster:"
+  echo "  oc adm release info --image-for=openshift-controller-manager"
+  echo ""
+  echo "Then run:"
+  echo "  OCM_IMAGE=<image> make deploy"
+  exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ROOT_DIR/config.yaml"
@@ -38,9 +53,12 @@ ETCD_IMAGE=$(yq '.etcd.image' "$CONFIG")
 ETCD_CLIENT_PORT=$(yq '.etcd.clientPort' "$CONFIG")
 ETCD_PEER_PORT=$(yq '.etcd.peerPort' "$CONFIG")
 OAS_PORT=$(yq '.openshiftApiserver.port' "$CONFIG")
+OCM_PORT=$(yq '.openshiftControllerManager.port' "$CONFIG")
 NGINX_IMAGE=$(yq '.nginx.image' "$CONFIG")
 echo "  etcd: $ETCD_IMAGE (ports: $ETCD_CLIENT_PORT/$ETCD_PEER_PORT)"
 echo "  openshift-apiserver port: $OAS_PORT"
+echo "  openshift-controller-manager port: $OCM_PORT"
+echo "  openshift-controller-manager image: $OCM_IMAGE"
 echo "  nginx proxy: $NGINX_IMAGE"
 
 echo "=== Creating namespace ==="
@@ -210,6 +228,8 @@ TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_IMAGE|$ETCD_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_CLIENT_PORT|$ETCD_CLIENT_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ETCD_PEER_PORT|$ETCD_PEER_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OPENSHIFT_APISERVER_PORT|$OAS_PORT|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|OCM_IMAGE|$OCM_IMAGE|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|OCM_PORT|$OCM_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|NGINX_IMAGE|$NGINX_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ROUTING_SUBDOMAIN|$ROUTING_SUBDOMAIN|g"
 if [ -n "$RUN_AS_USER" ]; then
@@ -217,6 +237,7 @@ if [ -n "$RUN_AS_USER" ]; then
 fi
 
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-apiserver.yaml.tpl" > "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml"
+sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-controller-manager.yaml.tpl" > "/tmp/openshift-controller-manager-${VCLUSTER_NAME}.yaml"
 
 # Build all ConfigMaps into a temp file and apply in a single call
 CONFIGMAPS_FILE="/tmp/vcluster-configmaps-${VCLUSTER_NAME}.yaml"
@@ -229,6 +250,15 @@ metadata:
 data:
   config.yaml: |
 $(sed 's/^/    /' "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshift-controller-manager-config
+  namespace: ${NAMESPACE}
+data:
+  config.yaml: |
+$(sed 's/^/    /' "/tmp/openshift-controller-manager-${VCLUSTER_NAME}.yaml")
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -313,6 +343,20 @@ for i in $(seq 1 30); do
   sleep 5
 done
 
+echo "=== Waiting for openshift-controller-manager health ==="
+for i in $(seq 1 30); do
+  if [ -z "$VCLUSTER_POD" ]; then
+    VCLUSTER_POD=$(kubectl get pod -n "$NAMESPACE" -l "app=vcluster,release=${VCLUSTER_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  fi
+  if [ -n "$VCLUSTER_POD" ] && kubectl exec "$VCLUSTER_POD" -n "$NAMESPACE" -c openshift-controller-manager -- \
+    curl -sk "https://127.0.0.1:${OCM_PORT}/healthz" 2>/dev/null | grep -q ok; then
+    echo "openshift-controller-manager is healthy!"
+    break
+  fi
+  echo "  Attempt $i/30 — waiting..."
+  sleep 5
+done
+
 echo "=== Connecting to vCluster ==="
 "$VCLUSTER_BIN" connect "$VCLUSTER_NAME" --namespace "$NAMESPACE" </dev/null &
 CONNECT_PID=$!
@@ -350,6 +394,9 @@ for i in $(seq 1 20); do
   echo "  Waiting for vCluster API to stabilize (attempt $i/20)..."
   sleep 3
 done
+
+echo "=== Creating namespaces for controller leader election ==="
+kubectl create namespace openshift-controller-manager --dry-run=client -o yaml | kubectl apply -f -
 
 echo "=== Verifying CRDs ==="
 REMAINING=("${CRD_NAMES[@]}")
