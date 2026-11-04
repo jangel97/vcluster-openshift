@@ -20,6 +20,7 @@ RESOURCE_SYNCER_IMAGE="${6:-}"
 SERVICE_CA_OPERATOR_IMAGE="${7:-}"
 OCM_IMAGE="${8:-}"
 CPC_IMAGE="${9:-}"
+OAUTH_APISERVER_IMAGE="${10:-}"
 
 if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
   echo "ERROR: OPENSHIFT_APISERVER_IMAGE is required."
@@ -59,6 +60,20 @@ if [ -z "$CPC_IMAGE" ]; then
   echo "  CPC_IMAGE=<image> make deploy"
   exit 1
 fi
+
+if [ -z "$OAUTH_APISERVER_IMAGE" ]; then
+  OAUTH_APISERVER_IMAGE=$(oc adm release info --image-for=oauth-apiserver 2>/dev/null || true)
+fi
+if [ -z "$OAUTH_APISERVER_IMAGE" ]; then
+  echo "ERROR: OAUTH_APISERVER_IMAGE is required."
+  echo ""
+  echo "Get it from your OCP cluster:"
+  echo "  oc adm release info --image-for=oauth-apiserver"
+  echo ""
+  echo "Then run:"
+  echo "  OAUTH_APISERVER_IMAGE=<image> make deploy"
+  exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ROOT_DIR/config.yaml"
@@ -70,11 +85,13 @@ ETCD_PEER_PORT=$(yq '.etcd.peerPort' "$CONFIG")
 OAS_PORT=$(yq '.openshiftApiserver.port' "$CONFIG")
 OCM_PORT=$(yq '.openshiftControllerManager.port' "$CONFIG")
 CPC_PORT=$(yq '.clusterPolicyController.port' "$CONFIG")
+OAUTH_APISERVER_PORT=$(yq '.oauthApiserver.port' "$CONFIG")
 NGINX_IMAGE=$(yq '.nginx.image' "$CONFIG")
 echo "  etcd: $ETCD_IMAGE (ports: $ETCD_CLIENT_PORT/$ETCD_PEER_PORT)"
 echo "  openshift-apiserver port: $OAS_PORT"
 echo "  openshift-controller-manager: $OCM_IMAGE (port: $OCM_PORT)"
 echo "  cluster-policy-controller: $CPC_IMAGE (port: $CPC_PORT)"
+echo "  openshift-oauth-apiserver: $OAUTH_APISERVER_IMAGE (port: $OAUTH_APISERVER_PORT)"
 echo "  nginx proxy: $NGINX_IMAGE"
 
 echo "=== Creating namespace ==="
@@ -248,6 +265,8 @@ TEMPLATE_SED="$TEMPLATE_SED; s|OCM_IMAGE|$OCM_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OCM_PORT|$OCM_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|CPC_IMAGE|$CPC_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|CPC_PORT|$CPC_PORT|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|OAUTH_APISERVER_IMAGE|$OAUTH_APISERVER_IMAGE|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|OAUTH_APISERVER_PORT|$OAUTH_APISERVER_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|NGINX_IMAGE|$NGINX_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ROUTING_SUBDOMAIN|$ROUTING_SUBDOMAIN|g"
 if [ -n "$RUN_AS_USER" ]; then
@@ -287,6 +306,15 @@ metadata:
 data:
   config.yaml: |
 $(sed 's/^/    /' "/tmp/cluster-policy-controller-${VCLUSTER_NAME}.yaml")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oauth-apiserver-audit-config
+  namespace: ${NAMESPACE}
+data:
+  policy.yaml: |
+$(sed 's/^/    /' "$ROOT_DIR/config/oauth-apiserver-audit-policy.yaml")
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -351,9 +379,9 @@ spec:
   - name: openshift-apiserver
     port: 8444
     targetPort: 8444
-  - name: user-api
-    port: 8446
-    targetPort: 8446
+  - name: oauth-apiserver
+    port: ${OAUTH_APISERVER_PORT}
+    targetPort: ${OAUTH_APISERVER_PORT}
 EOF
 
 echo "=== Waiting for openshift-apiserver health ==="
@@ -379,6 +407,20 @@ for i in $(seq 1 30); do
   if [ -n "$VCLUSTER_POD" ] && kubectl exec "$VCLUSTER_POD" -n "$NAMESPACE" -c openshift-controller-manager -- \
     curl -sk "https://127.0.0.1:${OCM_PORT}/healthz" 2>/dev/null | grep -q ok; then
     echo "openshift-controller-manager is healthy!"
+    break
+  fi
+  echo "  Attempt $i/30 — waiting..."
+  sleep 5
+done
+
+echo "=== Waiting for openshift-oauth-apiserver health ==="
+for i in $(seq 1 30); do
+  if [ -z "$VCLUSTER_POD" ]; then
+    VCLUSTER_POD=$(kubectl get pod -n "$NAMESPACE" -l "app=vcluster,release=${VCLUSTER_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  fi
+  if [ -n "$VCLUSTER_POD" ] && kubectl exec "$VCLUSTER_POD" -n "$NAMESPACE" -c openshift-oauth-apiserver -- \
+    curl -sk "https://127.0.0.1:${OAUTH_APISERVER_PORT}/healthz" 2>/dev/null | grep -q ok; then
+    echo "openshift-oauth-apiserver is healthy!"
     break
   fi
   echo "  Attempt $i/30 — waiting..."
@@ -413,9 +455,9 @@ echo "  Using stable ClusterIP: $CLUSTER_IP"
 for i in $(seq 1 20); do
   if kubectl create namespace openshift-apiserver --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null && \
      kubectl apply -f "$ROOT_DIR/manifests/service.yaml" 2>/dev/null && \
-     kubectl apply -f "$ROOT_DIR/manifests/user-api-service.yaml" 2>/dev/null && \
+     kubectl apply -f "$ROOT_DIR/manifests/oauth-api-service.yaml" 2>/dev/null && \
      sed "s/REPLACE_WITH_POD_IP/$CLUSTER_IP/" "$ROOT_DIR/manifests/endpoints.yaml" | kubectl apply -f - 2>/dev/null && \
-     sed "s/REPLACE_WITH_POD_IP/$CLUSTER_IP/" "$ROOT_DIR/manifests/user-api-endpoints.yaml" | kubectl apply -f - 2>/dev/null; then
+     sed "s/REPLACE_WITH_POD_IP/$CLUSTER_IP/" "$ROOT_DIR/manifests/oauth-api-endpoints.yaml" | kubectl apply -f - 2>/dev/null; then
     echo "  In-cluster manifests applied (ClusterIP: $CLUSTER_IP)."
     break
   fi
@@ -657,22 +699,24 @@ spec:
 "
 done
 
-echo "  Including v1.user.openshift.io"
-APISERVICE_YAML+="---
+for group in $(yq '.oauthApiGroups[]' "$CONFIG"); do
+  echo "  Including v1.${group} (oauth-apiserver)"
+  APISERVICE_YAML+="---
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
-  name: v1.user.openshift.io
+  name: v1.${group}
 spec:
-  group: user.openshift.io
+  group: ${group}
   version: v1
   service:
     namespace: openshift-apiserver
-    name: user-api
+    name: oauth-api
   groupPriorityMinimum: 9900
   versionPriority: 15
   insecureSkipTLSVerify: true
 "
+done
 
 APISERVICE_FILE="/tmp/vcluster-apiservices-${VCLUSTER_NAME}.yaml"
 echo "$APISERVICE_YAML" > "$APISERVICE_FILE"

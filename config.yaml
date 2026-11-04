@@ -19,6 +19,10 @@ openshiftControllerManager:
 clusterPolicyController:
   port: 10357
 
+# openshift-oauth-apiserver sidecar (User, Group, OAuthClient APIs)
+oauthApiserver:
+  port: 8447
+
 # nginx reverse proxy for OAuth metadata discovery
 nginx:
   image: nginxinc/nginx-unprivileged:1.27-alpine
@@ -33,7 +37,12 @@ apiGroups:
   - project.openshift.io
   - authorization.openshift.io
   - template.openshift.io
-  # user.openshift.io and oauth.openshift.io are served by oauth-apiserver, not openshift-apiserver, would need separate sidecar
+
+# API groups served by openshift-oauth-apiserver.
+# These get separate APIServices pointing to the oauth-apiserver service.
+oauthApiGroups:
+  - user.openshift.io
+  - oauth.openshift.io
 
 # Individual CRDs to fetch from the host OCP cluster.
 crds:
