@@ -20,6 +20,10 @@ controlPlane:
   distro:
     k8s:
       apiServer:
+        command:
+          - /binaries/hyperkube
+          - kube-apiserver
+          - --openshift-config=/var/ocp-kas-config/config.json
         extraArgs:
           - --enable-aggregator-routing=true
           - --secure-port=6444

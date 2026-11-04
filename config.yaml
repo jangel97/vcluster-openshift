@@ -23,6 +23,10 @@ clusterPolicyController:
 oauthApiserver:
   port: 8447
 
+# OCP kube-apiserver (hyperkube) — replaces vanilla kube-apiserver for native SCC admission
+# Image auto-detected from OCP release payload if not set
+hyperkube: {}
+
 # nginx reverse proxy for OAuth metadata discovery
 nginx:
   image: nginxinc/nginx-unprivileged:1.27-alpine

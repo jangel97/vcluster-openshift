@@ -21,9 +21,13 @@ SERVICE_CA_OPERATOR_IMAGE="${7:-}"
 OCM_IMAGE="${8:-}"
 CPC_IMAGE="${9:-}"
 OAUTH_APISERVER_IMAGE="${10:-}"
+HYPERKUBE_IMAGE="${11:-}"
 
 if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
-  echo "ERROR: OPENSHIFT_APISERVER_IMAGE is required."
+  OPENSHIFT_APISERVER_IMAGE=$(oc adm release info --image-for=openshift-apiserver 2>/dev/null || true)
+fi
+if [ -z "$OPENSHIFT_APISERVER_IMAGE" ]; then
+  echo "ERROR: OPENSHIFT_APISERVER_IMAGE could not be auto-detected."
   echo ""
   echo "Get it from your OCP cluster:"
   echo "  oc adm release info --image-for=openshift-apiserver"
@@ -74,6 +78,20 @@ if [ -z "$OAUTH_APISERVER_IMAGE" ]; then
   echo "  OAUTH_APISERVER_IMAGE=<image> make deploy"
   exit 1
 fi
+if [ -z "$HYPERKUBE_IMAGE" ]; then
+  HYPERKUBE_IMAGE=$(oc adm release info --image-for=hyperkube 2>/dev/null || true)
+fi
+if [ -z "$HYPERKUBE_IMAGE" ]; then
+  echo "ERROR: HYPERKUBE_IMAGE could not be auto-detected."
+  echo ""
+  echo "Get it from your OCP cluster:"
+  echo "  oc adm release info --image-for=hyperkube"
+  echo ""
+  echo "Then run:"
+  echo "  HYPERKUBE_IMAGE=<image> make deploy"
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG="$ROOT_DIR/config.yaml"
@@ -93,6 +111,19 @@ echo "  openshift-controller-manager: $OCM_IMAGE (port: $OCM_PORT)"
 echo "  cluster-policy-controller: $CPC_IMAGE (port: $CPC_PORT)"
 echo "  openshift-oauth-apiserver: $OAUTH_APISERVER_IMAGE (port: $OAUTH_APISERVER_PORT)"
 echo "  nginx proxy: $NGINX_IMAGE"
+echo "  hyperkube: $HYPERKUBE_IMAGE"
+
+echo "=== Detecting service CIDR ==="
+SERVICE_CIDR=$(kubectl get networks.config.openshift.io cluster --context "$HOST_CONTEXT" -o jsonpath='{.status.serviceNetwork[0]}' 2>/dev/null || true)
+if [ -z "$SERVICE_CIDR" ]; then
+  SERVICE_CIDR=$(kubectl get svc kubernetes --context "$HOST_CONTEXT" -o jsonpath='{.spec.clusterIP}' 2>/dev/null | sed 's/\.[0-9]*$/.0\/16/' || true)
+fi
+if [ -z "$SERVICE_CIDR" ]; then
+  SERVICE_CIDR="10.96.0.0/12"
+  echo "  WARNING: Could not detect service CIDR, using default $SERVICE_CIDR"
+else
+  echo "  Service CIDR: $SERVICE_CIDR"
+fi
 
 echo "=== Creating namespace ==="
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | \
@@ -268,7 +299,10 @@ TEMPLATE_SED="$TEMPLATE_SED; s|CPC_PORT|$CPC_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OAUTH_APISERVER_IMAGE|$OAUTH_APISERVER_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|OAUTH_APISERVER_PORT|$OAUTH_APISERVER_PORT|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|NGINX_IMAGE|$NGINX_IMAGE|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|HYPERKUBE_IMAGE|$HYPERKUBE_IMAGE|g"
 TEMPLATE_SED="$TEMPLATE_SED; s|ROUTING_SUBDOMAIN|$ROUTING_SUBDOMAIN|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|SERVICE_CIDR|$SERVICE_CIDR|g"
+TEMPLATE_SED="$TEMPLATE_SED; s|VCLUSTER_NAME|$VCLUSTER_NAME|g"
 if [ -n "$RUN_AS_USER" ]; then
   TEMPLATE_SED="$TEMPLATE_SED; s|RUN_AS_USER|$RUN_AS_USER|g"
 fi
@@ -276,6 +310,7 @@ fi
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-apiserver.yaml.tpl" > "/tmp/openshift-apiserver-${VCLUSTER_NAME}.yaml"
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/openshift-controller-manager.yaml.tpl" > "/tmp/openshift-controller-manager-${VCLUSTER_NAME}.yaml"
 sed "$TEMPLATE_SED" "$ROOT_DIR/config/cluster-policy-controller.yaml.tpl" > "/tmp/cluster-policy-controller-${VCLUSTER_NAME}.yaml"
+sed "$TEMPLATE_SED" "$ROOT_DIR/config/kube-apiserver-config.json.tpl" > "/tmp/kube-apiserver-config-${VCLUSTER_NAME}.json"
 
 # Build all ConfigMaps into a temp file and apply in a single call
 CONFIGMAPS_FILE="/tmp/vcluster-configmaps-${VCLUSTER_NAME}.yaml"
@@ -335,6 +370,15 @@ data:
 $(sed 's/^/    /' "$ROOT_DIR/config/openshift-compat-proxy.nginx.conf")
   proxy.js: |
 $(sed 's/^/    /' "$ROOT_DIR/config/openshift-compat-proxy.js")
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocp-kas-config
+  namespace: ${NAMESPACE}
+data:
+  config.json: |
+$(sed 's/^/    /' "/tmp/kube-apiserver-config-${VCLUSTER_NAME}.json")
 RESOURCES
 retry kubectl apply -f "$CONFIGMAPS_FILE"
 

@@ -1,11 +1,25 @@
 spec:
   template:
     spec:
+      initContainers:
+      - name: copy-hyperkube
+        image: HYPERKUBE_IMAGE
+        command: ["cp", "/usr/bin/hyperkube", "/binaries/hyperkube"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: RUN_AS_USER
+        volumeMounts:
+        - mountPath: /binaries
+          name: binaries
       containers:
       - name: syncer
         volumeMounts:
         - mountPath: /etc/webhook
           name: webhook-token-auth
+          readOnly: true
+        - mountPath: /var/ocp-kas-config
+          name: ocp-kas-config
           readOnly: true
       - name: openshift-etcd
         image: ETCD_IMAGE
@@ -204,3 +218,6 @@ spec:
       - name: webhook-token-auth
         configMap:
           name: webhook-token-auth
+      - name: ocp-kas-config
+        configMap:
+          name: ocp-kas-config
